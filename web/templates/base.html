@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Toshiba Monitor{% endblock %}</title>
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+    <script src="{{ url_for('static', filename='js/chart.umd.min.js') }}"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+
+    {% block head %}{% endblock %}
+</head>
+<body
+    data-current-user-role="{{ current_user.role if current_user.is_authenticated else 'viewer' }}"
+    data-current-user-verified="{{ '1' if current_user.is_authenticated and current_user.is_verified else '0' }}"
+    data-current-user-modules='{{ current_user.allowed_modules | default([]) | tojson if current_user.is_authenticated else "[]" }}'
+    data-current-user-offices='{{ current_user.allowed_offices | default([]) | tojson if current_user.is_authenticated else "[]" }}'
+>
+    {% block content %}{% endblock %}
+
+    <script>
+        const API = location.protocol + '//' + location.host;
+        const POLL_INT = Number("{{ poll_interval | default(30) }}") || 30;
+        window.currentUsername = {{ username | default('میهمان') | tojson }};
+    </script>
+    {% block global_scripts %}{% endblock %}
+    {% if load_dashboard_scripts | default(true) %}
+    <!-- بارگذاری Sortable قبل از dashboard.js -->
+    <script src="{{ url_for('static', filename='js/Sortable.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/legacy-mode.js') }}"></script>
+    {% endif %}
+    {% block scripts %}{% endblock %}
+</body>
+</html>

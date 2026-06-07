@@ -1,0 +1,317 @@
+{% extends "base.html" %}
+
+{% block title %}مدیریت کاربران{% endblock %}
+
+{% block content %}
+<main class="users-page">
+  <header class="users-header">
+    <div>
+      <h1>مدیریت کاربران</h1>
+      <p>فقط ادمین می‌تواند نقش‌ها و وضعیت تأیید را مدیریت کند.</p>
+    </div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end">
+      <button class="btn btn-green" type="button" onclick="openUserAddModal()">➕ افزودن کاربر</button>
+      <button class="btn btn-cyan" type="button" onclick="loadUsers()">بارگذاری کاربران</button>
+      <a class="btn btn-cyan" href="{{ url_for('dashboard.index') }}">بازگشت به داشبورد</a>
+    </div>
+  </header>
+
+  <section class="users-card">
+    <div class="users-toolbar">
+      <span id="users-status" class="users-status"></span>
+    </div>
+    <div class="users-table-wrap">
+      <table class="users-table">
+        <thead>
+          <tr>
+            <th>Username</th>
+            <th>Email</th>
+            <th>Role</th>
+            <th>Verified</th>
+            <th>Access</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="users-tbody">
+          <tr><td colspan="6" style="text-align:center;color:var(--text2)">در حال بارگذاری...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<div class="modal-overlay" id="user-add-modal" style="display:none" onclick="if (event.target === this) closeUserAddModal()">
+  <div class="modal users-modal" style="width:min(760px, 96vw)" onclick="event.stopPropagation()">
+    <h3>➕ افزودن کاربر جدید</h3>
+    <p class="users-modal-hint">نام کاربری باید فقط انگلیسی باشد. کاربر پس از ساخت، ایمیل تنظیم رمز دریافت می‌کند.</p>
+    <div class="form-group">
+      <label class="form-label">نام کاربری</label>
+      <input class="form-input" id="new-username" type="text" autocomplete="off" minlength="3" maxlength="32" pattern="[A-Za-z0-9._-]+" placeholder="example.user">
+    </div>
+    <div class="form-group">
+      <label class="form-label">ایمیل</label>
+      <input class="form-input" id="new-email" type="email" autocomplete="off">
+    </div>
+    <div class="form-group">
+      <label class="form-label">نقش</label>
+      <select class="form-input" id="new-role">
+        <option value="admin">admin</option>
+        <option value="manager">manager</option>
+        <option value="viewer" selected>viewer</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <div class="users-field-head">
+        <label class="form-label">دفاتر مجاز</label>
+        <span class="users-field-note">خالی = همه دفاتر</span>
+      </div>
+      <div class="users-choice-grid" id="new-offices"></div>
+    </div>
+    <div class="form-group">
+      <div class="users-field-head">
+        <label class="form-label">ماژول‌های مجاز</label>
+        <span class="users-field-note">خالی = همه ماژول‌ها</span>
+      </div>
+      <div class="users-choice-grid" id="new-modules"></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-green" type="button" onclick="createUser()">ثبت و ارسال ایمیل</button>
+      <button class="btn" type="button" style="color:#ff0000;border-color:#ff0000" onclick="closeUserAddModal()">انصراف</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="user-access-modal" style="display:none" onclick="if (event.target === this) closeUserAccessModal()">
+  <div class="modal users-modal" style="width:min(760px, 96vw)" onclick="event.stopPropagation()">
+    <h3>🔒 تنظیم دسترسی کاربر</h3>
+    <p class="users-modal-hint">هر گزینه‌ای که انتخاب شود به‌صورت محدودکننده اعمال می‌شود. اگر چیزی انتخاب نکنید، همه مجاز هستند.</p>
+    <div class="form-group">
+      <label class="form-label">کاربر</label>
+      <input class="form-input" id="access-user-label" type="text" disabled>
+    </div>
+    <div class="form-group">
+      <div class="users-field-head">
+        <label class="form-label">دفاتر مجاز</label>
+        <span class="users-field-note">انتخاب چندگانه</span>
+      </div>
+      <div class="users-choice-grid" id="access-offices"></div>
+    </div>
+    <div class="form-group">
+      <div class="users-field-head">
+        <label class="form-label">ماژول‌های مجاز</label>
+        <span class="users-field-note">انتخاب چندگانه</span>
+      </div>
+      <div class="users-choice-grid" id="access-modules"></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-cyan" type="button" onclick="saveAccess()">ذخیره دسترسی</button>
+      <button class="btn" type="button" style="color:#ff0000;border-color:#ff0000" onclick="closeUserAccessModal()">انصراف</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const OFFICE_OPTIONS = ['imamat', 'soroush', 'falestin', 'elahiye', 'other'];
+const MODULE_OPTIONS = ['printers', 'logs', 'excel', 'users'];
+let usersCache = [];
+let accessUserId = null;
+
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function buildChoiceGrid(containerId, options, groupName) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = options.map(option => `
+    <label class="users-choice-item">
+      <input type="checkbox" name="${groupName}" value="${option}">
+      <span>${escapeHtml(option)}</span>
+    </label>
+  `).join('');
+}
+
+function getChoiceValues(containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return [];
+  return Array.from(container.querySelectorAll('input[type="checkbox"]:checked')).map(input => input.value);
+}
+
+function setChoiceValues(containerId, values) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const selected = new Set((values || []).map(value => String(value)));
+  container.querySelectorAll('input[type="checkbox"]').forEach(input => {
+    input.checked = selected.has(input.value);
+  });
+}
+
+function validateEnglishUsername(username) {
+  return /^[A-Za-z0-9._-]{3,32}$/.test(username);
+}
+
+function openUserAddModal() {
+  buildChoiceGrid('new-offices', OFFICE_OPTIONS, 'new_offices');
+  buildChoiceGrid('new-modules', MODULE_OPTIONS, 'new_modules');
+  document.getElementById('new-username').value = '';
+  document.getElementById('new-email').value = '';
+  document.getElementById('new-role').value = 'viewer';
+  document.getElementById('user-add-modal').style.display = 'flex';
+}
+
+function closeUserAddModal() {
+  document.getElementById('user-add-modal').style.display = 'none';
+}
+
+function openUserAccessModal(userId) {
+  const user = usersCache.find(item => String(item.id) === String(userId));
+  if (!user) return;
+  accessUserId = user.id;
+  document.getElementById('access-user-label').value = `${user.username} <${user.email}>`;
+  buildChoiceGrid('access-offices', OFFICE_OPTIONS, 'access_offices');
+  buildChoiceGrid('access-modules', MODULE_OPTIONS, 'access_modules');
+  setChoiceValues('access-offices', user.allowed_offices || []);
+  setChoiceValues('access-modules', user.allowed_modules || []);
+  document.getElementById('user-access-modal').style.display = 'flex';
+}
+
+function closeUserAccessModal() {
+  document.getElementById('user-access-modal').style.display = 'none';
+  accessUserId = null;
+}
+
+function accessSummary(values, emptyLabel) {
+  return (values && values.length) ? values.map(escapeHtml).join('، ') : emptyLabel;
+}
+
+async function loadUsers() {
+  const status = document.getElementById('users-status');
+  const tbody = document.getElementById('users-tbody');
+  status.textContent = 'در حال دریافت کاربران...';
+  try {
+    const res = await fetch('/api/users', { headers: { 'Accept': 'application/json' } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'خطا در دریافت کاربران');
+    usersCache = data.users || [];
+    tbody.innerHTML = usersCache.map(user => `
+      <tr>
+        <td>${escapeHtml(user.username)}</td>
+        <td>${escapeHtml(user.email)}</td>
+        <td>
+          <select class="form-input user-role-select" data-user-id="${user.id}">
+            <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>admin</option>
+            <option value="manager" ${user.role === 'manager' ? 'selected' : ''}>manager</option>
+            <option value="viewer" ${user.role === 'viewer' ? 'selected' : ''}>viewer</option>
+          </select>
+        </td>
+        <td>
+          <button class="btn ${user.is_verified ? 'btn-green' : 'btn-orange'}" onclick="toggleVerify(${user.id}, ${user.is_verified ? 'false' : 'true'})">
+            ${user.is_verified ? 'Verified' : 'Pending'}
+          </button>
+        </td>
+        <td>
+          <div style="font-size:11px;line-height:1.6;color:var(--text2)">
+            <div><strong>دفاتر:</strong> ${accessSummary(user.allowed_offices, 'همه')}</div>
+            <div><strong>ماژول‌ها:</strong> ${accessSummary(user.allowed_modules, 'همه')}</div>
+          </div>
+        </td>
+        <td>
+          <button class="btn btn-cyan" onclick="saveRole(${user.id})">Save Role</button>
+          <button class="btn btn-green" onclick="openUserAccessModal(${user.id})">Access</button>
+          <button class="btn btn-red" onclick="deleteUser(${user.id})">Delete</button>
+        </td>
+      </tr>
+    `).join('');
+    status.textContent = `${data.total} کاربر بارگذاری شد`;
+  } catch (err) {
+    status.textContent = err.message;
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--red)">${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+async function createUser() {
+  const username = document.getElementById('new-username').value.trim();
+  if (!validateEnglishUsername(username)) {
+    alert('نام کاربری باید ۳ تا ۳۲ کاراکتر و فقط انگلیسی باشد (A-Z, 0-9, . _ -)');
+    return;
+  }
+  const payload = {
+    username,
+    email: document.getElementById('new-email').value.trim(),
+    role: document.getElementById('new-role').value,
+    allowed_offices: getChoiceValues('new-offices'),
+    allowed_modules: getChoiceValues('new-modules'),
+  };
+  const res = await fetch('/api/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) return alert(data.error || 'خطا');
+  closeUserAddModal();
+  loadUsers();
+  alert(data.user?.email_sent ? 'کاربر ساخته شد و ایمیل تنظیم رمز ارسال شد.' : 'کاربر ساخته شد، اما ارسال ایمیل ناموفق بود.');
+}
+
+async function saveRole(userId) {
+  const select = document.querySelector(`.user-role-select[data-user-id="${userId}"]`);
+  const role = select.value;
+  const res = await fetch(`/api/users/${userId}/role`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role }),
+  });
+  const data = await res.json();
+  if (!res.ok) return alert(data.error || 'خطا');
+  loadUsers();
+}
+
+async function toggleVerify(userId, isVerified) {
+  const res = await fetch(`/api/users/${userId}/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ is_verified: isVerified }),
+  });
+  const data = await res.json();
+  if (!res.ok) return alert(data.error || 'خطا');
+  loadUsers();
+}
+
+async function deleteUser(userId) {
+  if (!confirm('این کاربر حذف شود؟')) return;
+  const res = await fetch(`/api/users/${userId}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok) return alert(data.error || 'خطا');
+  loadUsers();
+}
+
+async function saveAccess() {
+  if (!accessUserId) return;
+  const payload = {
+    allowed_offices: getChoiceValues('access-offices'),
+    allowed_modules: getChoiceValues('access-modules'),
+  };
+  const res = await fetch(`/api/users/${accessUserId}/access`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) return alert(data.error || 'خطا');
+  closeUserAccessModal();
+  loadUsers();
+}
+
+buildChoiceGrid('new-offices', OFFICE_OPTIONS, 'new_offices');
+buildChoiceGrid('new-modules', MODULE_OPTIONS, 'new_modules');
+
+document.addEventListener('DOMContentLoaded', loadUsers);
+</script>
+{% endblock %}

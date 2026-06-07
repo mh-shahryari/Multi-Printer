@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+
+{% block title %}Toshiba Monitor v2{% endblock %}
+
+{% block content %}
+<!-- TOPBAR -->
+<header class="topbar">
+  <div class="logo">TOSHIBA<span> MONITOR</span> <span style="font-size:9px;color:var(--text3)">v2</span></div>
+  <div class="topbar-meta">
+    <div class="meta-chip"><span class="meta-val g" id="m-on">—</span><span>آنلاین</span></div>
+    <div class="meta-chip"><span class="meta-val r" id="m-off">—</span><span>آفلاین</span></div>
+    <div class="meta-chip"><span class="meta-val c" id="m-poll">#—</span><span>Pull</span></div>
+    <div class="meta-chip"><span class="meta-val" id="m-time" style="font-size:11px">—</span></div>
+    {% if current_user.is_authenticated %}
+    <div class="meta-chip"><span class="meta-val" id="m-user">{{ username }}</span><span>کاربر</span></div>
+    {% endif %}
+  </div>
+  <div class="topbar-actions">
+    <div class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="تغییر تم">
+      <div class="theme-toggle-knob"></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;color:var(--text3)">
+      <div class="dot-live" id="dot"></div><span id="dot-txt">Connecting</span>
+    </div>
+    {% if current_user.is_authenticated and current_user.is_verified and current_user.role in ['admin', 'manager'] and current_user.can_access_module('printers') %}
+    <button class="btn btn-cyan" onclick="triggerPoll()">⟳ Pull</button>
+    {% endif %}
+    {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'admin' and current_user.can_access_module('printers') %}
+    <button class="btn btn-orange" onclick="resetPrinterOrder()">↺ بازنشانی ترتیب</button>
+    <button class="btn btn-green" onclick="showAddModal()">＋ پرینتر</button>
+    {% endif %}
+    {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'admin' and current_user.can_access_module('users') %}
+    <a class="btn btn-cyan" href="{{ url_for('users.users_page') }}">👤 مدیریت کاربران</a>
+    {% endif %}
+    {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'manager' and current_user.can_access_module('excel') %}
+    <button class="btn btn-yellow" onclick="exportExcel()">↓ Excel</button>
+    {% endif %}
+    {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'admin' and current_user.can_access_module('excel') %}
+    <button class="btn btn-yellow" onclick="exportExcel()">↓ Excel</button>
+    <button class="btn btn-orange" onclick="exportJSON()">↓ JSON</button>
+    {% if current_user.is_authenticated %}
+    <a class="btn btn-red" href="{{ url_for('auth.logout') }}">خروج</a>
+    {% endif %}
+    {% elif current_user.is_authenticated %}
+    <a class="btn btn-red" href="{{ url_for('auth.logout') }}">خروج</a>
+    {% endif %}
+  </div>
+</header>
+<div id="cbar"><div id="cfill" style="width:100%"></div></div>
+
+<!-- APP BODY: sidebar + content -->
+<div class="app-layout">
+
+  <!-- ── SIDEBAR ── -->
+  <aside class="sidebar" id="sidebar">
+    <!-- نمای کلی -->
+    <div class="sb-overview sb-item active" data-tab="overview" onclick="switchTab('overview',this)">
+      <span class="sb-ov-icon">🖥</span>
+      <span class="sb-ov-label">نمای کلی</span>
+      <span class="sb-ov-badge" id="sb-ov-badge"></span>
+    </div>
+
+    <div class="sb-divider"></div>
+
+    <!-- گروه‌های دفاتر — با JS پر می‌شوند -->
+    <div id="sidebar-groups"></div>
+  </aside>
+
+<!-- MAIN -->
+<main class="main">
+
+  <!-- ── OVERVIEW ── -->
+  <div id="panel-overview" class="tab-panel active">
+    <div class="overview-grid" id="overview-grid">
+      <div style="padding:60px;text-align:center;color:var(--text3);font-family:var(--mono)">در حال اتصال...</div>
+    </div>
+    <!-- Access Panel in overview -->
+    <div class="access-panel" id="access-panel" style="display:none">
+      <div class="section-title">🌐 دسترسی از سیستم‌های دیگر</div>
+      <div class="access-grid" id="access-grid"></div>
+    </div>
+
+    <!-- بخش نمودار مصرف روزانه -->
+    {% if current_user.can_access_module('printers') %}
+    <div class="section" style="margin-top:14px">
+      <div class="section-title">📊 نمودار مصرف روزانه (۳۰ روز اخیر)</div>
+      <div style="display:flex; gap:10px; margin-bottom:10px; align-items:center; flex-wrap:wrap">
+        <select id="chart-printer-select" class="form-input" style="width:200px">
+          <option value="111">همه پرینترها</option>
+        </select>
+        <button class="btn btn-cyan" onclick="loadDailyChart()">📈 نمایش</button>
+      </div>
+      <div style="position:relative; height:300px;">
+        <canvas id="dailyChart" style="width:100%; height:100%;"></canvas>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Global Log in overview -->
+    {% if current_user.can_access_module('logs') %}
+    <div class="section" style="margin-top:14px">
+      <div class="section-title">📋 آخرین رویدادها (همه پرینترها)</div>
+      <div class="log-toolbar">
+        <div class="log-filter" id="global-filter">
+          <button class="filter-btn" onclick="filterLog('all',this,'global-log')">همه</button>
+          <button class="filter-btn" onclick="filterLog('ALERT',this,'global-log')">هشدار</button>
+          <button class="filter-btn" onclick="filterLog('PRINT',this,'global-log')">چاپ</button>
+          <button class="filter-btn" onclick="filterLog('STATUS',this,'global-log')">وضعیت</button>
+          <button class="filter-btn" onclick="filterLog('SERVICE',this,'global-log')">🔧 سرویس</button>
+          <button class="filter-btn" onclick="filterLog('REFILL',this,'global-log')">🖨 شارژ</button>
+        </div>
+        <span class="log-count" id="global-log-count"></span>
+        <!-- فیلدهای بازه زمانی -->
+        <input type="datetime-local" id="log-start" class="form-input" style="width:auto; font-family:var(--mono); font-size:11px;" title="شروع بازه">
+        <input type="datetime-local" id="log-end" class="form-input" style="width:auto; font-family:var(--mono); font-size:11px;" title="پایان بازه">
+        <button class="btn btn-cyan" onclick="applyDateFilter(null)">🔍 اعمال فیلتر</button>
+        <button class="btn btn-yellow" onclick="exportLogsWithRange(null, 'excel')">↓ Excel (بازه)</button>
+        <button class="btn btn-orange" onclick="exportLogsWithRange(null, 'csv')">↓ CSV (بازه)</button>
+        <button class="btn btn-yellow" onclick="exportLogExcel()">↓ Excel Log</button>
+        <button class="btn btn-orange" onclick="exportLogJSON()">↓ JSON Log</button>
+        <button class="btn" style="border-color:rgba(255,61,61,.3);color:var(--red);background:rgba(255,61,61,.06)" onclick="clearLogs()">× پاک</button>
+      </div>
+      <div id="global-log"><div class="log-empty">رویدادی ثبت نشده</div></div>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Printer panels generated dynamically -->
+</main>
+</div><!-- /app-layout -->
+
+<!-- ── ADD PRINTER MODAL ── -->
+<div class="modal-overlay" id="modal-add">
+  <div class="modal" style="width:600px">
+    <h3>🖨 افزودن پرینتر</h3>
+    <div class="modal-tabs">
+      <div class="modal-tab active" onclick="switchAddTab('single',this)">📌 دستی</div>
+      <div class="modal-tab" onclick="switchAddTab('bulk',this)">📋 تجمعی</div>
+      <div class="modal-tab" onclick="switchAddTab('discover',this)">🔍 کشف خودکار</div>
+    </div>
+    <!-- تب دستی -->
+    <div class="modal-pane active" id="pane-single">
+      <div class="form-group">
+        <label class="form-label">آدرس IP</label>
+        <input class="form-input" id="add-ip" placeholder="172.16.25.58" type="text">
+      </div>
+      <div class="form-group">
+        <label class="form-label">نام (اختیاری)</label>
+        <input class="form-input" id="add-name" placeholder="Toshiba #5" type="text">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Community SNMP</label>
+        <input class="form-input" id="add-community-single" placeholder="public" value="public" type="text">
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-green" onclick="doAddPrinter()">＋ افزودن</button>
+        <button class="btn" style="color: #ff0000;border-color: #ff0000;" onclick="closeModal()">انصراف</button>
+      </div>
+    </div>
+    <!-- تب تجمعی -->
+    <div class="modal-pane" id="pane-bulk">
+      <div class="form-group">
+        <label class="form-label">Community SNMP (برای همه)</label>
+        <input class="form-input" id="add-community-bulk" placeholder="public" value="public" type="text">
+      </div>
+      <div class="form-group">
+        <label class="form-label">لیست پرینترها — هر خط یک پرینتر</label>
+        <textarea class="bulk-textarea" id="bulk-input" placeholder="172.16.25.34  HP اتاق مدیریت
+172.16.25.60  Canon طبقه دوم
+172.16.25.86
+172.16.25.148 Canon انبار  private
+..."></textarea>
+        <div class="bulk-hint">
+          فرمت هر خط: &nbsp;<code style="color:var(--cyan)">IP &nbsp; نام (اختیاری) &nbsp; community (اختیاری)</code><br>
+          ستون‌ها با فاصله یا tab جدا می‌شوند. خطوط # نادیده گرفته می‌شوند.
+        </div>
+      </div>
+      <div id="bulk-results" style="display:flex;flex-direction:column;gap:4px;max-height:180px;overflow-y:auto;margin-bottom:10px"></div>
+      <div class="form-actions">
+        <button class="btn btn-cyan" onclick="doBulkPreview()">👁 پیش‌نمایش</button>
+        <button class="btn btn-green" id="bulk-submit-btn" onclick="doBulkAdd()" style="display:none">＋ افزودن همه</button>
+        <button class="btn" style="color: #ff0000;border-color: #ff0000;" onclick="closeModal()">انصراف</button>
+      </div>
+    </div>
+    <!-- تب کشف خودکار -->
+    <div class="modal-pane" id="pane-discover">
+      <div class="form-group">
+        <label class="form-label">Community SNMP</label>
+        <input class="form-input" id="add-community-discover" placeholder="public" value="public" type="text">
+      </div>
+      <div class="form-group">
+        <label class="form-label">زیرشبکه‌ها</label>
+        <div id="discovery-ranges">
+          <div class="range-row">
+            <input class="form-input" name="subnet[]" placeholder="172.16.25" value="172.16.25" style="flex:2">
+            <input class="form-input" name="start[]" placeholder="1" value="1" style="flex:1;direction:ltr">
+            <input class="form-input" name="end[]" placeholder="254" value="254" style="flex:1;direction:ltr">
+          </div>
+        </div>
+        <button type="button" class="btn btn-cyan" onclick="addDiscoveryRange()" style="margin-top:6px;font-size:11px">➕ رنج دیگر</button>
+      </div>
+      <div id="discover-results" class="discover-results"></div>
+      <div class="form-actions">
+        <button class="btn btn-cyan" onclick="doDiscover()">🔍 کشف</button>
+        <button class="btn" style="color: #ff0000;border-color: #ff0000;" onclick="closeModal()">انصراف</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MANUAL EVENT MODAL -->
+<div class="ev-modal-overlay" id="ev-modal">
+  <div class="ev-modal">
+    <button class="ev-close" onclick="closeEvModal()">×</button>
+    <div class="ev-modal-header">
+      <div class="ev-modal-icon" id="ev-modal-icon">🔧</div>
+      <div>
+        <div class="ev-modal-title" id="ev-modal-title">ثبت سرویس</div>
+        <div class="ev-modal-sub" id="ev-modal-sub">—</div>
+      </div>
+    </div>
+    <input type="hidden" id="ev-ip">
+    <input type="hidden" id="ev-type">
+    <div class="ev-field">
+      <label>توضیحات <span style="color:var(--red)">*</span></label>
+      <textarea id="ev-notes" placeholder="توضیحات سرویس یا تعویض کارتریج را وارد کنید..."></textarea>
+    </div>
+    <div class="ev-field">
+      <label>نام تکنسین (اختیاری)</label>
+      <input type="text" id="ev-tech" placeholder="نام تکنسین یا مسئول سرویس">
+    </div>
+    <div class="ev-modal-actions">
+      <button class="btn" style="color: #ff0000;border-color: #ff0000;" onclick="closeEvModal()">انصراف</button>
+      <button class="btn btn-cyan" id="ev-submit-btn" onclick="submitManualEvent()">✓ ثبت رویداد</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL EDIT NICKNAME (سفارشی) -->
+<div class="modal-overlay" id="modal-nickname">
+  <div class="modal" style="width:400px">
+    <h3>✏️ ویرایش نام مستعار</h3>
+    <div class="form-group">
+      <label class="form-label">نام مستعار جدید</label>
+      <input type="text" id="nickname-input" class="form-input" placeholder="مثال: پرینتر طبقه دوم" autocomplete="off">
+      <div style="font-size:10px; color:var(--text3); margin-top:4px">خالی بگذارید برای حذف نام مستعار</div>
+    </div>
+    <div class="form-actions">
+      <button class="btn " id="nickname-cancel" style="border-color:var(--red);color:var(--red)">انصراف</button>
+      <button class="btn btn-cyan" id="nickname-save">ذخیره</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast"></div>
+ 
+<!-- TONER RESET MODAL -->
+<div class="modal-overlay" id="modal-toner-reset" style="display:none" onclick="if(event.target===this) closeTonerResetModal()">
+  <div class="modal" style="width:420px">
+    <h3>🔁 تنظیم مجدد کارتریج</h3>
+    <div class="form-group">
+      <label class="form-label">رنگ کارتریج</label>
+      <select id="toner-reset-color" class="form-input"></select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">درصد جدید (۰–۱۰۰)</label>
+      <input id="toner-reset-level" type="number" min="0" max="100" value="100" class="form-input">
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeTonerResetModal()">انصراف</button>
+      <button class="btn btn-green" onclick="submitTonerReset()">تأیید</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
