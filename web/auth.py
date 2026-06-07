@@ -15,6 +15,22 @@ from flask_login import LoginManager
 from config import settings
 from models import User
 from utils import generate_reset_token, hash_token, send_email, verify_recaptcha, verify_reset_token
+from web.security import limiter
+from core.security_audit import (
+    log_security_event, SecurityEvent, Severity,
+    count_recent_failed_logins,
+    MAX_FAILED_ATTEMPTS_PER_USER, MAX_FAILED_ATTEMPTS_PER_IP,
+    FAILED_ATTEMPT_WINDOW_MINUTES,
+)
+
+
+def _audit_context():
+    """خواندن اطلاعات context برای audit log."""
+    return {
+        "ip_address": request.remote_addr,
+        "user_agent": (request.headers.get("User-Agent") or "")[:200],
+        "endpoint": request.endpoint,
+    }
 
 auth_bp = Blueprint("auth", __name__)
 login_manager = LoginManager()
@@ -65,10 +81,37 @@ def load_user(user_id):
     return User.get(user_id)
 
 
-def _next_url(default_endpoint="dashboard.index"):
-    next_url = request.values.get("next")
-    if next_url and next_url.startswith("/"):
-        return next_url
+def _is_safe_next_url(target: str) -> bool:
+    """
+    بررسی امن بودن URL مقصد برای جلوگیری از Open Redirect attack.
+    فقط مسیرهای نسبی داخلی مجاز هستند (مثل /dashboard، /printers).
+    مسیرهای زیر رد می‌شوند:
+      - URL مطلق (http://...، https://...)
+      - URLهای protocol-relative (//evil.com)
+      - URLهای با scheme (javascript:، data:)
+      - مقادیر خالی یا None
+    """
+    if not target:
+        return False
+    from urllib.parse import urlparse
+    parsed = urlparse(target)
+    # نه scheme داشته باشد، نه netloc؛ و باید با '/' شروع شود اما نه '//'
+    return (
+        not parsed.scheme
+        and not parsed.netloc
+        and target.startswith("/")
+        and not target.startswith("//")
+    )
+
+
+def _next_url(default_endpoint: str = "dashboard.index") -> str:
+    """دریافت امن URL بعد از login/register.
+    اگر پارامتر `next` معتبر بود از آن استفاده می‌کند، در غیر این صورت
+    به endpoint پیش‌فرض هدایت می‌کند.
+    """
+    target = request.values.get("next", "")
+    if _is_safe_next_url(target):
+        return target
     return url_for(default_endpoint)
 
 
@@ -185,23 +228,68 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{3,32}$")
 
 
 @auth_bp.route("/login", methods=["GET", "POST"])
+@limiter.limit("10 per minute; 30 per 5 minutes", methods=["POST"])
 def login():
     if current_user.is_authenticated:
-        return redirect(url_for("dashboard.index"))
+        return redirect(_next_url())
 
     error = None
     if request.method == "POST":
-        if not verify_recaptcha(request.form.get("g-recaptcha-response", ""), request.remote_addr):
+        ctx = _audit_context()
+        identifier = (request.form.get("identifier") or "").strip()
+
+        # بررسی brute-force بر اساس IP/کاربر
+        ip_attempts = count_recent_failed_logins(
+            ip_address=ctx["ip_address"], minutes=FAILED_ATTEMPT_WINDOW_MINUTES,
+        )
+        user_attempts = count_recent_failed_logins(
+            user_identifier=identifier, minutes=FAILED_ATTEMPT_WINDOW_MINUTES,
+        ) if identifier else 0
+
+        if ip_attempts >= MAX_FAILED_ATTEMPTS_PER_IP or user_attempts >= MAX_FAILED_ATTEMPTS_PER_USER:
+            log_security_event(
+                SecurityEvent.ACCOUNT_LOCKED, severity=Severity.CRITICAL,
+                user_identifier=identifier, success=False,
+                details=f"Too many failed attempts: ip={ip_attempts}, user={user_attempts}",
+                **ctx,
+            )
+            error = (
+                "تعداد تلاش‌های ناموفق از حد مجاز گذشته است. "
+                f"لطفاً پس از {FAILED_ATTEMPT_WINDOW_MINUTES} دقیقه دوباره تلاش کنید."
+            )
+        elif not verify_recaptcha(request.form.get("g-recaptcha-response", ""), ctx["ip_address"]):
+            log_security_event(
+                SecurityEvent.SUSPICIOUS_ACTIVITY, severity=Severity.WARNING,
+                user_identifier=identifier, success=False,
+                details="reCAPTCHA verification failed", **ctx,
+            )
             error = "کپچا معتبر نیست"
         else:
-            identifier = (request.form.get("identifier") or "").strip()
             password = request.form.get("password") or ""
             user = User.find_by_identifier(identifier)
             if user and user.is_active and user.verify_password(password):
                 login_user(user, remember=bool(request.form.get("remember")))
                 user.touch_login()
+                log_security_event(
+                    SecurityEvent.SUCCESSFUL_LOGIN, severity=Severity.INFO,
+                    user_identifier=user.username, user_id=user.id,
+                    success=True, **ctx,
+                )
                 flash("با موفقیت وارد شدید", "success")
-                return redirect(url_for("dashboard.index"))
+                return redirect(_next_url())
+            # تلاش ناموفق
+            log_security_event(
+                SecurityEvent.FAILED_LOGIN, severity=Severity.WARNING,
+                user_identifier=identifier,
+                user_id=user.id if user else None,
+                success=False,
+                details=(
+                    "User not found" if not user
+                    else "Inactive user" if not user.is_active
+                    else "Invalid password"
+                ),
+                **ctx,
+            )
             error = "نام کاربری/ایمیل یا رمز عبور اشتباه است"
 
     return render_template(
@@ -214,9 +302,10 @@ def login():
 
 
 @auth_bp.route("/register", methods=["GET", "POST"])
+@limiter.limit("5 per minute; 10 per hour", methods=["POST"])
 def register():
     if current_user.is_authenticated:
-        return redirect(url_for("dashboard.index"))
+        return redirect(_next_url())
 
     error = None
     if request.method == "POST":
@@ -243,11 +332,16 @@ def register():
                 if user:
                     login_user(user)
                     user.touch_login()
+                    log_security_event(
+                        SecurityEvent.ACCOUNT_CREATED, severity=Severity.INFO,
+                        user_identifier=user.username, user_id=user.id,
+                        success=True, **_audit_context(),
+                    )
                     if user.is_verified:
                         flash("ثبت‌نام انجام شد و حساب شما فعال است.", "success")
                     else:
                         flash("ثبت‌نام انجام شد. حساب شما در انتظار تأیید است.", "warning")
-                    return redirect(url_for("dashboard.index"))
+                    return redirect(_next_url())
                 error = "امکان ایجاد حساب وجود نداشت"
 
     return render_template(
@@ -259,11 +353,23 @@ def register():
 
 
 @auth_bp.route("/forgot-password", methods=["GET", "POST"])
+@limiter.limit("3 per minute; 5 per hour", methods=["POST"])
 def forgot_password():
     message = None
     if request.method == "POST":
         email = (request.form.get("email") or "").strip().lower()
         user = User.find_by_email(email)
+        ctx = _audit_context()
+        # همیشه log می‌کنیم (موفق یا نه) — برای detection حملات email enumeration
+        log_security_event(
+            SecurityEvent.PASSWORD_RESET_REQUESTED,
+            severity=Severity.INFO,
+            user_identifier=email,
+            user_id=user.id if user else None,
+            success=bool(user),
+            details=("Email matched" if user else "No matching email"),
+            **ctx,
+        )
         if user:
             token = generate_reset_token(user.id, user.email)
             token_hash = hash_token(token)
@@ -286,6 +392,7 @@ def forgot_password():
 
 
 @auth_bp.route("/reset-password/<token>", methods=["GET", "POST"])
+@limiter.limit("10 per minute", methods=["POST"])
 def reset_password(token):
     payload = verify_reset_token(token)
     token_hash = hash_token(token)
@@ -313,6 +420,11 @@ def reset_password(token):
         else:
             if user.set_password(password):
                 user.clear_reset_token()
+                log_security_event(
+                    SecurityEvent.PASSWORD_RESET_COMPLETED, severity=Severity.WARNING,
+                    user_identifier=user.username, user_id=user.id,
+                    success=True, **_audit_context(),
+                )
                 flash("رمز عبور با موفقیت تغییر کرد", "success")
                 return redirect(url_for("auth.login"))
             error = "امکان تغییر رمز وجود نداشت"
@@ -330,8 +442,13 @@ def google_login():
     if not hasattr(oauth, "google"):
         flash("ورود با گوگل فعال نشده است", "error")
         return redirect(url_for("auth.login"))
+    # nonce برای جلوگیری از replay attack (OIDC requirement)
+    import secrets
+    from flask import session
+    nonce = secrets.token_urlsafe(32)
+    session['oauth_nonce'] = nonce
     redirect_uri = url_for("auth.google_callback", _external=True)
-    return oauth.google.authorize_redirect(redirect_uri)
+    return oauth.google.authorize_redirect(redirect_uri, nonce=nonce)
 
 
 @auth_bp.route("/auth/google/callback")
@@ -339,13 +456,30 @@ def google_callback():
     if not hasattr(oauth, "google"):
         flash("ورود با گوگل فعال نشده است", "error")
         return redirect(url_for("auth.login"))
-    token = oauth.google.authorize_access_token()
-    profile = oauth.google.parse_id_token(token) or {}
+    ctx = _audit_context()
+    try:
+        token = oauth.google.authorize_access_token()
+        # دریافت و بررسی nonce
+        from flask import session
+        nonce = session.pop('oauth_nonce', None)
+        profile = oauth.google.parse_id_token(token, nonce=nonce) or {}
+    except Exception as e:
+        log_security_event(
+            SecurityEvent.OAUTH_FAILURE, severity=Severity.WARNING,
+            success=False, details=f"Token/nonce error: {e}", **ctx,
+        )
+        flash("خطا در ورود با گوگل: اطلاعات احراز هویت نامعتبر است", "error")
+        return redirect(url_for("auth.login"))
+
     email = (profile.get("email") or "").strip().lower()
     google_id = str(profile.get("sub") or profile.get("id") or "").strip()
     name = (profile.get("name") or profile.get("given_name") or email.split("@")[0] or "user").strip()
 
     if not email:
+        log_security_event(
+            SecurityEvent.OAUTH_FAILURE, severity=Severity.WARNING,
+            success=False, details="No email in Google profile", **ctx,
+        )
         flash("اطلاعات ایمیل از گوگل دریافت نشد", "error")
         return redirect(url_for("auth.login"))
 
@@ -360,11 +494,16 @@ def google_callback():
     if user:
         login_user(user)
         user.touch_login()
+        log_security_event(
+            SecurityEvent.OAUTH_LOGIN, severity=Severity.INFO,
+            user_identifier=user.username, user_id=user.id,
+            success=True, details="Google OAuth", **ctx,
+        )
         if user.is_verified:
             flash("با حساب گوگل وارد شدید", "success")
         else:
             flash("حساب شما با گوگل وارد شد اما هنوز در انتظار تأیید ادمین است", "warning")
-        return redirect(url_for("dashboard.index"))
+        return redirect(_next_url())
 
     flash("ورود گوگلی انجام نشد", "error")
     return redirect(url_for("auth.login"))
@@ -375,6 +514,13 @@ def google_callback():
 @auth_bp.route("/logout")
 @login_required
 def logout():
+    user_id = current_user.id
+    username = current_user.username
     logout_user()
+    log_security_event(
+        SecurityEvent.LOGOUT, severity=Severity.INFO,
+        user_identifier=username, user_id=user_id, success=True,
+        **_audit_context(),
+    )
     flash("خروج با موفقیت انجام شد", "success")
     return redirect(url_for("auth.login"))

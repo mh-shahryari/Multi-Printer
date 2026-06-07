@@ -1,15 +1,15 @@
 @echo off
 set "SCRIPT_DIR=%~dp0"
 pushd "%SCRIPT_DIR%"
-title Printer Monitor - Starting...
+title Multi Printer Monitoring - Starting...
 
 :: ============================================================
-::   Multi-Brand Printer Monitor v3  -  Start Script
+::   Multi Printer Monitoring  -  Start Script
 :: ============================================================
 
 echo.
 echo  ============================================================
-echo   Multi-Brand Printer Monitor v3
+echo   Multi Printer Monitoring
 echo  ============================================================
 echo.
 

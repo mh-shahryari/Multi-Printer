@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import secrets
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -22,6 +23,43 @@ from config.settings import DB_PATH
 # NOTE: from core import store حذف شده است (import پویا درون تابع add_event)
 
 log = logging.getLogger("PrinterMonitor")
+
+
+# ─── Context manager برای اتصال امن به SQLite ─────────────────
+@contextmanager
+def db_connection(timeout: float = 10.0, commit: bool = False):
+    """
+    Context manager برای اتصال امن به دیتابیس.
+    تضمین می‌کند که اتصال در همه شرایط (موفق یا خطا) بسته می‌شود.
+
+    استفاده:
+        # فقط خواندن:
+        with db_connection() as conn:
+            row = conn.execute("SELECT ... WHERE id=?", (uid,)).fetchone()
+            return _row_to_dict(row)
+
+        # نوشتن (با commit خودکار):
+        with db_connection(commit=True) as conn:
+            conn.execute("UPDATE users SET ... WHERE id=?", (uid,))
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=timeout)
+    try:
+        yield conn
+        if commit:
+            conn.commit()
+    except Exception:
+        # rollback خودکار در صورت خطا (اگر در حال نوشتن بودیم)
+        if commit:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 # فیلدهای top-level که مستقیم در ستون‌های جدول ذخیره می‌شوند (بقیه به details JSON می‌روند)
 _LOG_TOP_LEVEL_FIELDS = frozenset(
@@ -231,9 +269,16 @@ def init_db():
             c.execute(column_sql)
         except sqlite3.OperationalError:
             pass
-    
+
     conn.commit()
     conn.close()
+
+    # ─── راه‌اندازی جدول security audit ──────────────────────────
+    try:
+        from core.security_audit import init_security_audit
+        init_security_audit()
+    except Exception as e:
+        log.exception("Failed to init security_audit: %s", e)
 
 
 def _user_row_to_dict(row) -> Optional[dict]:
@@ -263,136 +308,95 @@ def _user_row_to_dict(row) -> Optional[dict]:
 
 def count_users() -> int:
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM users")
-        row = c.fetchone()
-        conn.close()
-        return int(row[0] or 0)
+        with db_connection() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM users").fetchone()
+            return int(row[0] or 0)
     except Exception as e:
         log.exception(f"Error counting users: {e}")
         return 0
 
 
-def get_user_by_id(user_id: int) -> Optional[dict]:
+# SELECT مشترک برای جدول users (برای جلوگیری از تکرار)
+_USER_SELECT_COLS = '''
+    id, username, email, password_hash, google_id, reset_token_hash,
+    reset_token_expires, role, is_verified, is_active, created_at,
+    updated_at, last_login_at, allowed_offices, allowed_modules
+'''
+
+
+def _fetch_user(where_clause: str, params: tuple) -> Optional[dict]:
+    """تابع helper: اجرای SELECT روی users با WHERE دلخواه."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            '''
-             SELECT id, username, email, password_hash, google_id, reset_token_hash,
-                 reset_token_expires, role, is_verified, is_active, created_at,
-                 updated_at, last_login_at, allowed_offices, allowed_modules
-            FROM users WHERE id = ?
-            ''',
-            (user_id,),
-        )
-        row = c.fetchone()
-        conn.close()
-        return _user_row_to_dict(row)
+        with db_connection() as conn:
+            row = conn.execute(
+                f"SELECT {_USER_SELECT_COLS} FROM users WHERE {where_clause}",
+                params,
+            ).fetchone()
+            return _user_row_to_dict(row)
     except Exception as e:
-        log.exception(f"Error loading user {user_id}: {e}")
+        log.exception(f"Error fetching user with {where_clause!r}: {e}")
         return None
+
+
+def _execute_user_update(sql: str, params: tuple, action_desc: str = "user") -> bool:
+    """تابع helper: اجرای UPDATE/DELETE روی users و برگرداندن True اگر >0 row متأثر شد."""
+    try:
+        with db_connection(commit=True) as conn:
+            cur = conn.execute(sql, params)
+            return cur.rowcount > 0
+    except Exception as e:
+        log.exception(f"Error updating {action_desc}: {e}")
+        return False
+
+
+def get_user_by_id(user_id: int) -> Optional[dict]:
+    return _fetch_user("id = ?", (user_id,))
 
 
 def get_user_by_identifier(identifier: str) -> Optional[dict]:
     identifier = (identifier or "").strip().lower()
     if not identifier:
         return None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            '''
-             SELECT id, username, email, password_hash, google_id, reset_token_hash,
-                 reset_token_expires, role, is_verified, is_active, created_at,
-                 updated_at, last_login_at, allowed_offices, allowed_modules
-            FROM users WHERE lower(username) = ? OR lower(email) = ?
-            ''',
-            (identifier, identifier),
-        )
-        row = c.fetchone()
-        conn.close()
-        return _user_row_to_dict(row)
-    except Exception as e:
-        log.exception(f"Error loading user by identifier {identifier}: {e}")
-        return None
+    return _fetch_user("lower(username) = ? OR lower(email) = ?", (identifier, identifier))
 
 
 def get_user_by_email(email: str) -> Optional[dict]:
     email = (email or "").strip().lower()
     if not email:
         return None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            '''
-             SELECT id, username, email, password_hash, google_id, reset_token_hash,
-                 reset_token_expires, role, is_verified, is_active, created_at,
-                 updated_at, last_login_at, allowed_offices, allowed_modules
-            FROM users WHERE lower(email) = ?
-            ''',
-            (email,),
-        )
-        row = c.fetchone()
-        conn.close()
-        return _user_row_to_dict(row)
-    except Exception as e:
-        log.exception(f"Error loading user by email {email}: {e}")
-        return None
+    return _fetch_user("lower(email) = ?", (email,))
 
 
 def get_user_by_google_id(google_id: str) -> Optional[dict]:
     google_id = (google_id or "").strip()
     if not google_id:
         return None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            '''
-             SELECT id, username, email, password_hash, google_id, reset_token_hash,
-                 reset_token_expires, role, is_verified, is_active, created_at,
-                 updated_at, last_login_at, allowed_offices, allowed_modules
-            FROM users WHERE google_id = ?
-            ''',
-            (google_id,),
-        )
-        row = c.fetchone()
-        conn.close()
-        return _user_row_to_dict(row)
-    except Exception as e:
-        log.exception(f"Error loading user by google_id {google_id}: {e}")
-        return None
+    return _fetch_user("google_id = ?", (google_id,))
 
 
 def create_user(username: str, email: str, password_hash: str = None, google_id: str = None,
                 role: str = "viewer", is_verified: bool = False,
                 allowed_offices=None, allowed_modules=None) -> Optional[dict]:
     now = datetime.now().isoformat()
+    username = (username or "").strip()
+    if not USERNAME_RE.fullmatch(username):
+        log.warning("Rejecting invalid username during user creation: %s", username)
+        return None
+    role = role if role in ("admin", "manager", "viewer") else "viewer"
     try:
-        username = (username or "").strip()
-        if not USERNAME_RE.fullmatch(username):
-            log.warning("Rejecting invalid username during user creation: %s", username)
-            return None
-        role = role if role in ("admin", "manager", "viewer") else "viewer"
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            '''
-            INSERT INTO users (username, email, password_hash, google_id, role,
-                               is_verified, email_verified, is_active, created_at, updated_at,
-                               allowed_offices, allowed_modules)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
-            ''',
-            (username.strip(), email.strip().lower(), password_hash, google_id,
-             role, 1 if is_verified else 0, 1 if is_verified else 0, now, now,
-             _dump_json_list(allowed_offices), _dump_json_list(allowed_modules)),
-        )
-        user_id = c.lastrowid
-        conn.commit()
-        conn.close()
+        with db_connection(commit=True) as conn:
+            cur = conn.execute(
+                '''
+                INSERT INTO users (username, email, password_hash, google_id, role,
+                                   is_verified, email_verified, is_active, created_at, updated_at,
+                                   allowed_offices, allowed_modules)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                ''',
+                (username, email.strip().lower(), password_hash, google_id,
+                 role, 1 if is_verified else 0, 1 if is_verified else 0, now, now,
+                 _dump_json_list(allowed_offices), _dump_json_list(allowed_modules)),
+            )
+            user_id = cur.lastrowid
         return get_user_by_id(user_id)
     except Exception as e:
         log.exception(f"Error creating user {username}: {e}")
@@ -400,76 +404,47 @@ def create_user(username: str, email: str, password_hash: str = None, google_id:
 
 
 def update_user_password(user_id: int, password_hash: str) -> bool:
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            'UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?',
-            (password_hash, datetime.now().isoformat(), user_id),
-        )
-        conn.commit()
-        ok = c.rowcount > 0
-        conn.close()
-        return ok
-    except Exception as e:
-        log.exception(f"Error updating password for user {user_id}: {e}")
-        return False
+    return _execute_user_update(
+        'UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?',
+        (password_hash, datetime.now().isoformat(), user_id),
+        f"password for user {user_id}",
+    )
 
 
 def set_user_google_id(user_id: int, google_id: str) -> bool:
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            'UPDATE users SET google_id = ?, updated_at = ? WHERE id = ?',
-            (google_id, datetime.now().isoformat(), user_id),
-        )
-        conn.commit()
-        ok = c.rowcount > 0
-        conn.close()
-        return ok
-    except Exception as e:
-        log.exception(f"Error updating google_id for user {user_id}: {e}")
-        return False
+    return _execute_user_update(
+        'UPDATE users SET google_id = ?, updated_at = ? WHERE id = ?',
+        (google_id, datetime.now().isoformat(), user_id),
+        f"google_id for user {user_id}",
+    )
 
 
 def touch_user_login(user_id: int) -> None:
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        now = datetime.now().isoformat()
-        c.execute(
-            'UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?',
-            (now, now, user_id),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        log.exception(f"Error touching login for user {user_id}: {e}")
+    now = datetime.now().isoformat()
+    _execute_user_update(
+        'UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?',
+        (now, now, user_id),
+        f"login timestamp for user {user_id}",
+    )
 
 
 def list_users() -> list:
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            '''
-            SELECT id, username, email, password_hash, google_id, reset_token_hash,
-                   reset_token_expires, role, is_verified, is_active, created_at,
-                   updated_at, last_login_at
-            FROM users
-            ORDER BY
-                CASE role
-                    WHEN 'admin' THEN 0
-                    WHEN 'manager' THEN 1
-                    ELSE 2
-                END,
-                username COLLATE NOCASE ASC
-            '''
-        )
-        rows = c.fetchall()
-        conn.close()
-        return [_user_row_to_dict(r) for r in rows]
+        with db_connection() as conn:
+            rows = conn.execute(
+                f'''
+                SELECT {_USER_SELECT_COLS}
+                FROM users
+                ORDER BY
+                    CASE role
+                        WHEN 'admin' THEN 0
+                        WHEN 'manager' THEN 1
+                        ELSE 2
+                    END,
+                    username COLLATE NOCASE ASC
+                '''
+            ).fetchall()
+            return [_user_row_to_dict(r) for r in rows]
     except Exception as e:
         log.exception(f"Error listing users: {e}")
         return []
@@ -479,143 +454,76 @@ def update_user_role(user_id: int, role: str) -> bool:
     role = role if role in ("admin", "manager", "viewer") else None
     if not role:
         return False
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            'UPDATE users SET role = ?, updated_at = ? WHERE id = ?',
-            (role, datetime.now().isoformat(), user_id),
-        )
-        conn.commit()
-        ok = c.rowcount > 0
-        conn.close()
-        return ok
-    except Exception as e:
-        log.exception(f"Error updating role for user {user_id}: {e}")
-        return False
+    return _execute_user_update(
+        'UPDATE users SET role = ?, updated_at = ? WHERE id = ?',
+        (role, datetime.now().isoformat(), user_id),
+        f"role for user {user_id}",
+    )
 
 
 def update_user_verified(user_id: int, is_verified: bool) -> bool:
-    try:
-        verified_int = 1 if is_verified else 0
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            'UPDATE users SET is_verified = ?, email_verified = ?, updated_at = ? WHERE id = ?',
-            (verified_int, verified_int, datetime.now().isoformat(), user_id),
-        )
-        conn.commit()
-        ok = c.rowcount > 0
-        conn.close()
-        return ok
-    except Exception as e:
-        log.exception(f"Error updating verification for user {user_id}: {e}")
-        return False
+    verified_int = 1 if is_verified else 0
+    return _execute_user_update(
+        'UPDATE users SET is_verified = ?, email_verified = ?, updated_at = ? WHERE id = ?',
+        (verified_int, verified_int, datetime.now().isoformat(), user_id),
+        f"verification for user {user_id}",
+    )
 
 
 def update_user_access(user_id: int, allowed_offices=None, allowed_modules=None) -> bool:
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            '''
-            UPDATE users
-            SET allowed_offices = ?, allowed_modules = ?, updated_at = ?
-            WHERE id = ?
-            ''',
-            (_dump_json_list(allowed_offices), _dump_json_list(allowed_modules), datetime.now().isoformat(), user_id),
-        )
-        conn.commit()
-        ok = c.rowcount > 0
-        conn.close()
-        return ok
-    except Exception as e:
-        log.exception(f"Error updating access for user {user_id}: {e}")
-        return False
+    return _execute_user_update(
+        '''
+        UPDATE users
+        SET allowed_offices = ?, allowed_modules = ?, updated_at = ?
+        WHERE id = ?
+        ''',
+        (_dump_json_list(allowed_offices), _dump_json_list(allowed_modules),
+         datetime.now().isoformat(), user_id),
+        f"access for user {user_id}",
+    )
 
 
 def delete_user(user_id: int) -> bool:
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('DELETE FROM users WHERE id = ?', (user_id,))
-        conn.commit()
-        ok = c.rowcount > 0
-        conn.close()
-        return ok
-    except Exception as e:
-        log.exception(f"Error deleting user {user_id}: {e}")
-        return False
+    return _execute_user_update(
+        'DELETE FROM users WHERE id = ?',
+        (user_id,),
+        f"delete user {user_id}",
+    )
 
 
 def set_password_reset_token(user_id: int, token_hash: str, expires_at: str) -> bool:
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            '''
-            UPDATE users
-            SET reset_token_hash = ?, reset_token_expires = ?, updated_at = ?
-            WHERE id = ?
-            ''',
-            (token_hash, expires_at, datetime.now().isoformat(), user_id),
-        )
-        conn.commit()
-        ok = c.rowcount > 0
-        conn.close()
-        return ok
-    except Exception as e:
-        log.exception(f"Error setting reset token for user {user_id}: {e}")
-        return False
+    return _execute_user_update(
+        '''
+        UPDATE users
+        SET reset_token_hash = ?, reset_token_expires = ?, updated_at = ?
+        WHERE id = ?
+        ''',
+        (token_hash, expires_at, datetime.now().isoformat(), user_id),
+        f"reset token for user {user_id}",
+    )
 
 
 def get_user_by_reset_token_hash(token_hash: str) -> Optional[dict]:
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            '''
-            SELECT id, username, email, password_hash, google_id, reset_token_hash,
-                   reset_token_expires, role, is_verified, is_active, created_at,
-                   updated_at, last_login_at, allowed_offices, allowed_modules
-            FROM users WHERE reset_token_hash = ?
-            ''',
-            (token_hash,),
-        )
-        row = c.fetchone()
-        conn.close()
-        return _user_row_to_dict(row)
-    except Exception as e:
-        log.exception(f"Error loading user by reset token: {e}")
+    if not token_hash:
         return None
+    return _fetch_user("reset_token_hash = ?", (token_hash,))
 
 
 def clear_password_reset_token(user_id: int) -> bool:
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            '''
-            UPDATE users
-            SET reset_token_hash = NULL, reset_token_expires = NULL, updated_at = ?
-            WHERE id = ?
-            ''',
-            (datetime.now().isoformat(), user_id),
-        )
-        conn.commit()
-        ok = c.rowcount > 0
-        conn.close()
-        return ok
-    except Exception as e:
-        log.exception(f"Error clearing reset token for user {user_id}: {e}")
-        return False
+    return _execute_user_update(
+        '''
+        UPDATE users
+        SET reset_token_hash = NULL, reset_token_expires = NULL, updated_at = ?
+        WHERE id = ?
+        ''',
+        (datetime.now().isoformat(), user_id),
+        f"clear reset token for user {user_id}",
+    )
 
 
 def add_event(ip: str, etype: str, details: dict):
     try:
         from core import store
-        conn = sqlite3.connect(DB_PATH, timeout=10.0)  # timeout اضافه شد
-        c = conn.cursor()
         timestamp = details.get("timestamp", datetime.now().isoformat())
         message = details.get("message", "")
         pages = details.get("pages")
@@ -631,15 +539,14 @@ def add_event(ip: str, etype: str, details: dict):
                 if p["ip"] == ip:
                     printer_name = p["name"]
                     break
-        c.execute('''
-            INSERT INTO logs (printer_ip, printer_name, timestamp, type, message,
-                              pages, color, code, severity, paper_size, username, details)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (ip, printer_name, timestamp, etype, message,
-              pages, color, code, severity, paper_size, username,
-              json.dumps(other, ensure_ascii=False)))
-        conn.commit()
-        conn.close()
+        with db_connection(commit=True) as conn:
+            conn.execute('''
+                INSERT INTO logs (printer_ip, printer_name, timestamp, type, message,
+                                  pages, color, code, severity, paper_size, username, details)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (ip, printer_name, timestamp, etype, message,
+                  pages, color, code, severity, paper_size, username,
+                  json.dumps(other, ensure_ascii=False)))
     except Exception as e:
         log.exception(f"Error adding event to DB: {e}")
 
@@ -663,29 +570,28 @@ def _row_to_dict(row) -> dict:
 
 def get_log(ip: str, limit: int = 500, ips=None) -> list:
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
         params = []
-        where = "WHERE printer_ip = ?"
         if ips:
             ips = [str(item).strip() for item in ips if str(item).strip()]
             if not ips:
-                conn.close()
                 return []
             placeholders = ",".join(["?"] * len(ips))
             where = f"WHERE printer_ip IN ({placeholders})"
             params.extend(ips)
         else:
+            where = "WHERE printer_ip = ?"
             params.append(ip)
-        c.execute('''
-            SELECT printer_ip, printer_name, timestamp, type, message,
-                   pages, color, code, severity, paper_size, username, details
-            FROM logs ''' + where + '''
-            ORDER BY timestamp DESC LIMIT ?
-        ''', params + [limit])
-        rows = c.fetchall()
-        conn.close()
-        return [_row_to_dict(r) for r in rows]
+        with db_connection() as conn:
+            rows = conn.execute(
+                f'''
+                SELECT printer_ip, printer_name, timestamp, type, message,
+                       pages, color, code, severity, paper_size, username, details
+                FROM logs {where}
+                ORDER BY timestamp DESC LIMIT ?
+                ''',
+                params + [limit],
+            ).fetchall()
+            return [_row_to_dict(r) for r in rows]
     except Exception as e:
         log.exception(f"Error reading logs from DB: {e}")
         return []
@@ -693,19 +599,11 @@ def get_log(ip: str, limit: int = 500, ips=None) -> list:
 
 def get_all_logs(start=None, end=None, limit: int = 1000, ip=None, ips=None) -> list:
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        query = '''
-            SELECT printer_ip, printer_name, timestamp, type, message,
-                   pages, color, code, severity, paper_size, username, details
-            FROM logs
-        '''
         params = []
         conditions = []
         if ips:
             ips = [str(item).strip() for item in ips if str(item).strip()]
             if not ips:
-                conn.close()
                 return []
             placeholders = ",".join(["?"] * len(ips))
             conditions.append(f"printer_ip IN ({placeholders})")
@@ -722,14 +620,20 @@ def get_all_logs(start=None, end=None, limit: int = 1000, ip=None, ips=None) -> 
         elif end:
             conditions.append("timestamp <= ?")
             params.append(end)
+
+        query = '''
+            SELECT printer_ip, printer_name, timestamp, type, message,
+                   pages, color, code, severity, paper_size, username, details
+            FROM logs
+        '''
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY timestamp DESC LIMIT ?"
         params.append(limit)
-        c.execute(query, params)
-        rows = c.fetchall()
-        conn.close()
-        return [_row_to_dict(r) for r in rows]
+
+        with db_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [_row_to_dict(r) for r in rows]
     except Exception as e:
         log.exception(f"Error reading all logs: {e}")
         return []
@@ -742,33 +646,25 @@ def clear_logs(ip=None, ips=None) -> int:
     """
     keep_types = ('PRINT', 'SERVICE', 'REFILL')
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        placeholders = ','.join(['?'] * len(keep_types))
+        type_placeholders = ','.join(['?'] * len(keep_types))
         if ips:
             ips = [str(item).strip() for item in ips if str(item).strip()]
             if not ips:
-                conn.close()
                 return 0
             ip_placeholders = ','.join(['?'] * len(ips))
-            type_placeholders = ','.join(['?'] * len(keep_types))
-            c.execute(
-                f"DELETE FROM logs WHERE printer_ip IN ({ip_placeholders}) AND type NOT IN ({type_placeholders})",
-                tuple(ips) + keep_types
-            )
+            sql = (f"DELETE FROM logs WHERE printer_ip IN ({ip_placeholders}) "
+                   f"AND type NOT IN ({type_placeholders})")
+            params = tuple(ips) + keep_types
         elif ip:
-            c.execute(
-                f"DELETE FROM logs WHERE printer_ip = ? AND type NOT IN ({placeholders})",
-                (ip,) + keep_types
-            )
+            sql = f"DELETE FROM logs WHERE printer_ip = ? AND type NOT IN ({type_placeholders})"
+            params = (ip,) + keep_types
         else:
-            c.execute(
-                f"DELETE FROM logs WHERE type NOT IN ({placeholders})",
-                keep_types
-            )
-        deleted = c.rowcount
-        conn.commit()
-        conn.close()
+            sql = f"DELETE FROM logs WHERE type NOT IN ({type_placeholders})"
+            params = keep_types
+
+        with db_connection(commit=True) as conn:
+            cur = conn.execute(sql, params)
+            deleted = cur.rowcount
         log.info(f"clear_logs: {deleted} رویداد پاک شد (PRINT, SERVICE, REFILL حفظ شد)")
         return deleted
     except Exception as e:
@@ -777,42 +673,35 @@ def clear_logs(ip=None, ips=None) -> int:
 
 
 def ensure_printer_counters_columns():
+    column_alters = (
+        "ALTER TABLE printer_counters ADD COLUMN device_type TEXT",
+        "ALTER TABLE printer_counters ADD COLUMN toner_level INTEGER DEFAULT NULL",
+        "ALTER TABLE printer_counters ADD COLUMN manual_override INTEGER DEFAULT 0",
+        "ALTER TABLE printer_counters ADD COLUMN override_color TEXT",
+        "ALTER TABLE printer_counters ADD COLUMN override_base_level INTEGER",
+        "ALTER TABLE printer_counters ADD COLUMN override_start_total INTEGER",
+        "ALTER TABLE printer_counters ADD COLUMN override_start_toner INTEGER",
+        "ALTER TABLE printer_counters ADD COLUMN yield_per_page INTEGER DEFAULT 2000",
+        "ALTER TABLE printer_counters ADD COLUMN last_alert_codes TEXT DEFAULT NULL",
+    )
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=10.0)
-        c = conn.cursor()
-        for column_sql in (
-            "ALTER TABLE printer_counters ADD COLUMN device_type TEXT",
-            "ALTER TABLE printer_counters ADD COLUMN toner_level INTEGER DEFAULT NULL",
-            "ALTER TABLE printer_counters ADD COLUMN manual_override INTEGER DEFAULT 0",
-            "ALTER TABLE printer_counters ADD COLUMN override_color TEXT",
-            "ALTER TABLE printer_counters ADD COLUMN override_base_level INTEGER",
-            "ALTER TABLE printer_counters ADD COLUMN override_start_total INTEGER",
-            "ALTER TABLE printer_counters ADD COLUMN override_start_toner INTEGER",
-            "ALTER TABLE printer_counters ADD COLUMN yield_per_page INTEGER DEFAULT 2000",
-            "ALTER TABLE printer_counters ADD COLUMN last_alert_codes TEXT DEFAULT NULL",
-        ):
-            try:
-                c.execute(column_sql)
-            except sqlite3.OperationalError:
-                pass
-        conn.commit()
-        conn.close()
+        with db_connection(commit=True) as conn:
+            for column_sql in column_alters:
+                try:
+                    conn.execute(column_sql)
+                except sqlite3.OperationalError:
+                    pass  # ستون قبلاً وجود دارد
     except Exception as e:
         log.exception(f"Error ensuring printer_counters columns: {e}")
 
 
 def prune_old_print_logs(days=90) -> int:
-    """
-    حذف خودکار لاگ‌های نوع PRINT که قدیمی‌تر از days روز هستند.
-    """
+    """حذف خودکار لاگ‌های نوع PRINT که قدیمی‌تر از days روز هستند."""
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("DELETE FROM logs WHERE type='PRINT' AND timestamp < ?", (cutoff,))
-        deleted = c.rowcount
-        conn.commit()
-        conn.close()
+        with db_connection(commit=True) as conn:
+            cur = conn.execute("DELETE FROM logs WHERE type='PRINT' AND timestamp < ?", (cutoff,))
+            deleted = cur.rowcount
         if deleted:
             log.info(f"prune_old_print_logs: {deleted} رکورد PRINT قدیمی پاک شد")
         return deleted
@@ -821,65 +710,73 @@ def prune_old_print_logs(days=90) -> int:
         return 0
 
 
-def load_printer_counters(ip: str) -> dict:
+# نام ستون‌های printer_counters (برای جلوگیری از تکرار)
+_COUNTERS_COLS = (
+    "print_total, full_color, black_white, toner_level, manual_override, "
+    "override_color, override_base_level, override_start_total, override_start_toner, "
+    "yield_per_page, last_alert_codes, a3_total, a4_total, alert_codes"
+)
+
+
+def load_printer_counters(ip: str) -> Optional[dict]:
     """بارگذاری آخرین مقادیر شمارنده از دیتابیس"""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT print_total, full_color, black_white, toner_level, manual_override, override_color, override_base_level, override_start_total, override_start_toner, yield_per_page, last_alert_codes, a3_total, a4_total, alert_codes FROM printer_counters WHERE ip = ?", (ip,))
-        row = c.fetchone()
-        conn.close()
-        if row:
-            return {
-                "print_total": row[0],
-                "full_color": row[1],
-                "black_white": row[2],
-                "toner_level": row[3],
-                "manual_override": row[4] or 0,
-                "override_color": row[5],
-                "override_base_level": row[6],
-                "override_start_total": row[7],
-                "override_start_toner": row[8],
-                "yield_per_page": row[9] if row[9] is not None else 2000,
-                "last_alert_codes": json.loads(row[10]) if row[10] else [],
-                "a3_total": row[11],
-                "a4_total": row[12],
-                "alert_codes": json.loads(row[13]) if row[13] else [],
-            }
+        with db_connection() as conn:
+            row = conn.execute(
+                f"SELECT {_COUNTERS_COLS} FROM printer_counters WHERE ip = ?",
+                (ip,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "print_total": row[0],
+            "full_color": row[1],
+            "black_white": row[2],
+            "toner_level": row[3],
+            "manual_override": row[4] or 0,
+            "override_color": row[5],
+            "override_base_level": row[6],
+            "override_start_total": row[7],
+            "override_start_toner": row[8],
+            "yield_per_page": row[9] if row[9] is not None else 2000,
+            "last_alert_codes": json.loads(row[10]) if row[10] else [],
+            "a3_total": row[11],
+            "a4_total": row[12],
+            "alert_codes": json.loads(row[13]) if row[13] else [],
+        }
     except Exception as e:
         log.exception(f"Error loading counters for {ip}: {e}")
-    return None
+        return None
 
 
 def save_printer_counters(ip: str, data: dict):
     """ذخیره مقادیر شمارنده در دیتابیس"""
     ensure_printer_counters_columns()
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('''
-            INSERT OR REPLACE INTO printer_counters
-            (ip, print_total, full_color, black_white, toner_level, manual_override, override_color, override_base_level, override_start_total, override_start_toner, yield_per_page, last_alert_codes, a3_total, a4_total, alert_codes, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            ip,
-            data.get("print_total"),
-            data.get("full_color"),
-            data.get("black_white"),
-            data.get("toner_level"),
-            data.get("manual_override", 0),
-            data.get("override_color"),
-            data.get("override_base_level"),
-            data.get("override_start_total"),
-            data.get("override_start_toner"),
-            data.get("yield_per_page", 2000),
-            json.dumps(data.get("last_alert_codes", [])),
-            data.get("a3_total"),
-            data.get("a4_total"),
-            json.dumps(data.get("alert_codes", [])),
-            datetime.now().isoformat()
-        ))
-        conn.commit()
-        conn.close()
+        with db_connection(commit=True) as conn:
+            conn.execute('''
+                INSERT OR REPLACE INTO printer_counters
+                (ip, print_total, full_color, black_white, toner_level, manual_override,
+                 override_color, override_base_level, override_start_total, override_start_toner,
+                 yield_per_page, last_alert_codes, a3_total, a4_total, alert_codes, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                ip,
+                data.get("print_total"),
+                data.get("full_color"),
+                data.get("black_white"),
+                data.get("toner_level"),
+                data.get("manual_override", 0),
+                data.get("override_color"),
+                data.get("override_base_level"),
+                data.get("override_start_total"),
+                data.get("override_start_toner"),
+                data.get("yield_per_page", 2000),
+                json.dumps(data.get("last_alert_codes", [])),
+                data.get("a3_total"),
+                data.get("a4_total"),
+                json.dumps(data.get("alert_codes", [])),
+                datetime.now().isoformat(),
+            ))
     except Exception as e:
         log.exception(f"Error saving counters for {ip}: {e}")

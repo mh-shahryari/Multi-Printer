@@ -36,8 +36,32 @@ def hash_token(token: str) -> str:
 
 
 def verify_recaptcha(token: str, remote_ip: str = None) -> bool:
+    """
+    تأیید توکن reCAPTCHA.
+
+    رفتار:
+    - اگر RECAPTCHA_SECRET_KEY در production تنظیم نشده باشد → خطا (راه نمی‌اندازیم
+      چون captcha نباید بی‌سروصدا غیرفعال شود).
+    - اگر در development تنظیم نشده باشد → True (با هشدار) — برای راحتی توسعه.
+    - اگر تنظیم شده باشد → تأیید واقعی با Google API.
+    """
     if not settings.RECAPTCHA_SECRET_KEY:
+        if settings.ENVIRONMENT == "production":
+            # در production هرگز bypass نکنیم؛ این یک حفره امنیتی است.
+            log.error(
+                "❌ reCAPTCHA verification skipped in PRODUCTION because "
+                "RECAPTCHA_SECRET_KEY is not set! Treating as failed."
+            )
+            return False
+        # development: بدون captcha (با هشدار یکباره)
+        if not getattr(verify_recaptcha, "_warned", False):
+            log.warning(
+                "⚠  reCAPTCHA is DISABLED (no RECAPTCHA_SECRET_KEY). "
+                "Set the env variable to enable. Acceptable for development only."
+            )
+            verify_recaptcha._warned = True
         return True
+
     if not token:
         return False
     try:
@@ -47,12 +71,20 @@ def verify_recaptcha(token: str, remote_ip: str = None) -> bool:
         }
         if remote_ip:
             payload["remoteip"] = remote_ip
-        response = requests.post("https://www.google.com/recaptcha/api/siteverify", data=payload, timeout=10)
+        response = requests.post(
+            "https://www.google.com/recaptcha/api/siteverify",
+            data=payload,
+            timeout=10,
+        )
         data = response.json()
-        return bool(data.get("success"))
+        success = bool(data.get("success"))
+        if not success:
+            log.warning("reCAPTCHA verification failed: %s", data.get("error-codes"))
+        return success
     except Exception as exc:
-        log.exception("reCAPTCHA verification failed: %s", exc)
-        return False
+        log.exception("reCAPTCHA verification error: %s", exc)
+        # در production fail-closed: اگر سرویس Google در دسترس نباشد، کاربر رد می‌شود
+        return settings.ENVIRONMENT != "production"
 
 
 def send_email(subject: str, recipient: str, text_body: str, html_body: str = None) -> bool:

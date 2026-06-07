@@ -187,7 +187,7 @@
     "name": "TOSHIBA e-STUDIO3540",
     "community": "public",
     "nickname": "",
-    "device_type": "color",
+    "device_type": "mono",
     "brand": "toshiba"
   },
   {
@@ -211,7 +211,7 @@
     "name": "TOSHIBA e-STUDIO257",
     "community": "public",
     "nickname": "",
-    "device_type": "color",
+    "device_type": "mono",
     "brand": "toshiba"
   }
 ]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-نقطه ورود برنامه Multi-Brand Printer Monitor
+نقطه ورود برنامه Multi Printer Monitoring
 اجرا: python run.py   (از داخل پوشه pm2/)
 """
 
@@ -126,7 +126,7 @@ def main():
     host_ip = _get_local_ip()
     log.info("""
 ╔══════════════════════════════════════════════════════╗
-║    Multi-Brand Printer Monitor  |  پایش لحظه‌ای     ║
+║    Multi Printer Monitoring  |  پایش لحظه‌ای        ║
 ╠══════════════════════════════════════════════════════╣""")
     with store.printers_lock:
         for p in store.PRINTERS:

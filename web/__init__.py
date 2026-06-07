@@ -15,7 +15,9 @@ from web.routes.stats      import bp as bp_stats
 from web.routes.validation import bp as bp_validation
 from web.routes.system     import bp as bp_system
 from web.routes.users      import bp as bp_users
+from web.routes.security   import bp as bp_security_audit
 from web.auth import auth_bp, init_auth, user_can_access_module
+from web.security import init_security, csrf
 from config import settings
 
 # مسیر مطلق پوشه web/ (همین فایل در web/ قرار دارد)
@@ -43,13 +45,22 @@ def create_app() -> Flask:
     )
 
     init_auth(app)
+    init_security(app)
 
     for blueprint in (
         auth_bp,
         bp_dashboard, bp_printers, bp_logs, bp_export,
         bp_scan, bp_discover, bp_stats, bp_validation, bp_system, bp_users,
+        bp_security_audit,
     ):
         app.register_blueprint(blueprint)
+
+    # ─── معافیت endpoint های JSON API از CSRF ──────────────────────
+    # برای endpointهای JSON که از session احراز هویت می‌کنند، CSRF protection
+    # کنترل می‌شود اما باید مرورگر/کلاینت header X-CSRFToken بفرستد.
+    # برای حالا، endpoint های GET (که side-effect ندارند) و کل bp_export
+    # که فقط GET دارد، نیازی به CSRF ندارند.
+    # Flask-WTF خودکار GET/HEAD/OPTIONS را معاف می‌کند.
 
     @app.before_request
     def protect_routes():
@@ -142,11 +153,28 @@ def create_app() -> Flask:
             return jsonify({"error": "forbidden"}), 403
         return redirect(url_for("dashboard.index"))
 
-    @app.after_request
-    def cors(r):
-        r.headers['Access-Control-Allow-Origin']  = '*'
-        r.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-        r.headers['Access-Control-Allow-Methods'] = 'GET,POST,DELETE,OPTIONS'
-        return r
+    # ─── CORS (only if explicitly configured via env) ────────────
+    # By default no CORS headers are set (same-origin only).
+    # Configure via CORS_ALLOWED_ORIGINS env variable.
+    if settings.CORS_ALLOWED_ORIGINS:
+        @app.after_request
+        def cors(r):
+            origin = request.headers.get("Origin", "")
+            allowed = settings.CORS_ALLOWED_ORIGINS
+            # دامنه درخواست‌کننده باید در whitelist باشد (یا '*' برای dev)
+            if "*" in allowed:
+                r.headers['Access-Control-Allow-Origin'] = '*'
+            elif origin in allowed:
+                r.headers['Access-Control-Allow-Origin'] = origin
+                # Vary: Origin مهم است تا cacheها origin مختلف را جدا نگه دارند
+                r.headers['Vary'] = 'Origin'
+            else:
+                # origin مجاز نیست → CORS header نگذاریم
+                return r
+            r.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-CSRFToken'
+            r.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+            r.headers['Access-Control-Allow-Credentials'] = 'true'
+            r.headers['Access-Control-Max-Age'] = '3600'
+            return r
 
     return app

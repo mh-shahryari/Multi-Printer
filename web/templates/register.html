@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}ثبت‌نام | Multi-Brand Printer Monitor{% endblock %}
+{% block title %}ثبت‌نام | Multi Printer Monitoring{% endblock %}
 
 {% block content %}
 <main class="auth-page">
@@ -22,6 +22,7 @@
         {% endif %}
       {% endwith %}
       <form method="post" class="auth-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>نام کاربری</label>
         <input class="form-input" type="text" name="username" placeholder="mohsen" required>
 

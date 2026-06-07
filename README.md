@@ -1,4 +1,4 @@
-# 🖨️ Multi-Brand Printer Monitor v2
+# 🖨️ Multi Printer Monitoring
 
 **پایش لحظه‌ای پرینترهای Toshiba، HP، Canon، Brother و دستگاه‌های سنسور دما/رطوبت (ECS100G) از طریق SNMP + HTTP.**
 
@@ -80,8 +80,8 @@
 
 ### 1. کلون مخزن
 ```bash
-git clone https://github.com/mh-shahryari/printer-monitor.git
-cd printer-monitor
+git clone https://github.com/mh-shahryari/multi-printer-monitoring.git
+cd multi-printer-monitoring
 
 
 
@@ -91,7 +91,7 @@ cd printer-monitor
 
 🗂️ ساختار پروژه
 text
-printer-monitor/
+multi-printer-monitoring/
 │
 ├── run.py                         # نقطه ورود اصلی برنامه
 ├── requirements.txt               # وابستگی‌های پایتون

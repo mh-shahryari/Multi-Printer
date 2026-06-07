@@ -29,7 +29,37 @@ POLL_INTERVAL = 60   # ثانیه (1 دقیقه)
 
 # ─── Flask ──────────────────────────────────────────────────────
 FLASK_PORT = 5053
-SECRET_KEY = os.getenv("SECRET_KEY", "change-this-secret-key-in-production")
+
+# ─── Environment & SECRET_KEY ───────────────────────────────────
+# ENVIRONMENT می‌تواند "development" یا "production" باشد.
+# در production، SECRET_KEY حتماً باید از env تنظیم شود وگرنه برنامه راه نمی‌افتد.
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
+_INSECURE_DEFAULT_KEY = "change-this-secret-key-in-production"
+SECRET_KEY = os.getenv("SECRET_KEY", "")
+
+if not SECRET_KEY:
+    if ENVIRONMENT == "production":
+        raise RuntimeError(
+            "❌ SECRET_KEY environment variable is REQUIRED in production!\n"
+            "   Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\"\n"
+            "   Then: export SECRET_KEY=<the-generated-key>"
+        )
+    # حالت development: کلید موقت با هشدار
+    import warnings
+    SECRET_KEY = _INSECURE_DEFAULT_KEY
+    warnings.warn(
+        "⚠  SECRET_KEY is using the INSECURE default value. "
+        "Set the SECRET_KEY environment variable for security. "
+        "This is acceptable for development only.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+elif SECRET_KEY == _INSECURE_DEFAULT_KEY and ENVIRONMENT == "production":
+    raise RuntimeError(
+        "❌ SECRET_KEY is set to the default INSECURE value in production!\n"
+        "   Generate a new one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+    )
+
 MAIL_SERVER = os.getenv("MAIL_SERVER", "")
 MAIL_PORT = int(os.getenv("MAIL_PORT", "587"))
 MAIL_USE_TLS = os.getenv("MAIL_USE_TLS", "1") == "1"
@@ -39,6 +69,21 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 RECAPTCHA_SITE_KEY = os.getenv("RECAPTCHA_SITE_KEY", "")
 RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY", "")
+
+# ─── CORS ───────────────────────────────────────────────────────
+# لیست origin هایی که اجازه دسترسی به API دارند (با کاما جدا کنید).
+# مقدار خالی = هیچ CORS header ای ست نمی‌شود (same-origin only).
+# مقدار "*" = همه origin ها (فقط برای development - خطرناک در production!)
+# مثال: CORS_ALLOWED_ORIGINS="https://app.example.com,https://admin.example.com"
+CORS_ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
+    if o.strip()
+]
+if "*" in CORS_ALLOWED_ORIGINS and ENVIRONMENT == "production":
+    raise RuntimeError(
+        "❌ CORS_ALLOWED_ORIGINS='*' is NOT allowed in production! "
+        "Specify exact origins like: https://app.example.com"
+    )
 
 # ─── دفاتر و subnetهای مجاز ─────────────────────────────────────
 OFFICE_SUBNETS = {

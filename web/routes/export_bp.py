@@ -124,6 +124,8 @@ def export_excel():
     except ImportError:
         HAVE_OX = False
 
+    # ─── دریافت snapshot و اعمال فیلترهای دسترسی ─────────────────
+    allowed_offices = user_allowed_offices(current_user)
     allowed_ips = allowed_printer_ips(current_user)
     with store.data_lock:
         snap = list(store.printer_data.values())
@@ -133,6 +135,7 @@ def export_excel():
         snap = [d for d in snap if d.get("ip") in allowed_ips]
         cfg = [p for p in cfg if p.get("ip") in allowed_ips]
 
+    # اگر openpyxl نصب نباشد، fallback به CSV
     if not HAVE_OX:
         return _csv_full_report(snap, cfg)
 

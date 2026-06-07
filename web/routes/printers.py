@@ -291,5 +291,3 @@ def toner_reset(ip):
     except Exception as e:
         log.exception('toner_reset failed for %s', ip)
         return jsonify({"error": "internal server error"}), 500
-
-    return jsonify({'status': 'ok'})
