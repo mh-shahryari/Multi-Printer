@@ -1,0 +1,217 @@
+[
+  {
+    "ip": "172.16.25.37",
+    "name": "HP ETHERNET MULTI-EN",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "hp"
+  },
+  {
+    "ip": "172.16.25.166",
+    "name": "Brother NC-8300h, Fi",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "brother"
+  },
+  {
+    "ip": "172.16.24.61",
+    "name": "TOSHIBA e-STUDIO2505",
+    "community": "public",
+    "nickname": "",
+    "device_type": "color",
+    "brand": "toshiba"
+  },
+  {
+    "ip": "172.16.25.39",
+    "name": "Canon MF240 Series /",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "canon"
+  },
+  {
+    "ip": "172.16.25.148",
+    "name": "Canon MF230 Series /",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "canon"
+  },
+  {
+    "ip": "172.16.25.34",
+    "name": "HP ETHERNET MULTI-EN",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "hp"
+  },
+  {
+    "ip": "172.16.25.38",
+    "name": "HP ETHERNET MULTI-EN",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "hp"
+  },
+  {
+    "ip": "172.16.0.43",
+    "name": "Canon LBP2330K Serie",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "canon"
+  },
+  {
+    "ip": "172.16.0.40",
+    "name": "TOSHIBA e-STUDIO306",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "toshiba"
+  },
+  {
+    "ip": "172.16.32.41",
+    "name": "TOSHIBA e-STUDIO257",
+    "community": "public",
+    "nickname": "",
+    "device_type": "color",
+    "brand": "toshiba"
+  },
+  {
+    "ip": "172.16.25.60",
+    "name": "Canon MF230 Series /",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "canon"
+  },
+  {
+    "ip": "172.16.0.41",
+    "name": "TOSHIBA e-STUDIO306",
+    "community": "public",
+    "nickname": "",
+    "device_type": "color",
+    "brand": "toshiba"
+  },
+  {
+    "ip": "172.16.25.36",
+    "name": "LaserJet Enterprise M506dn",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "hp"
+  },
+  {
+    "ip": "172.16.25.43",
+    "name": "Brother NC-8300h, Fi",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "brother"
+  },
+  {
+    "ip": "172.16.25.55",
+    "name": "TOSHIBA e-STUDIO3518",
+    "community": "public",
+    "nickname": "",
+    "device_type": "color",
+    "brand": "toshiba"
+  },
+  {
+    "ip": "172.16.32.42",
+    "name": "Canon (الهیه)",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "canon"
+  },
+  {
+    "ip": "172.16.32.40",
+    "name": "Printer 172.16.32.40",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono"
+  },
+  {
+    "ip": "172.16.25.58",
+    "name": "HP ETHERNET MULTI-EN",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "hp"
+  },
+  {
+    "ip": "172.16.25.41",
+    "name": "Canon MF220 Series /",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "canon"
+  },
+  {
+    "ip": "172.16.25.59",
+    "name": "TOSHIBA e-STUDIO3015",
+    "community": "public",
+    "nickname": "",
+    "device_type": "color",
+    "brand": "toshiba"
+  },
+  {
+    "ip": "172.16.24.63",
+    "name": "canon مالی",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "canon"
+  },
+  {
+    "ip": "172.16.24.62",
+    "name": "canon منشی",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "canon"
+  },
+  {
+    "ip": "172.16.25.44",
+    "name": "ECS100G-Ver3.05",
+    "community": "public",
+    "nickname": "",
+    "device_type": "sensor",
+    "brand": "sensor"
+  },
+  {
+    "ip": "172.16.25.57",
+    "name": "TOSHIBA e-STUDIO3540",
+    "community": "public",
+    "nickname": "",
+    "device_type": "color",
+    "brand": "toshiba"
+  },
+  {
+    "ip": "172.16.0.42",
+    "name": "HP ETHERNET MULTI-EN",
+    "community": "public",
+    "nickname": "",
+    "device_type": "mono",
+    "brand": "hp"
+  },
+  {
+    "ip": "172.16.25.54",
+    "name": "TOSHIBA e-STUDIO2050",
+    "community": "public",
+    "nickname": "",
+    "device_type": "color",
+    "brand": "toshiba"
+  },
+  {
+    "ip": "172.16.25.53",
+    "name": "TOSHIBA e-STUDIO257",
+    "community": "public",
+    "nickname": "",
+    "device_type": "color",
+    "brand": "toshiba"
+  }
+]
