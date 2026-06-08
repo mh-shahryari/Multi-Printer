@@ -16,34 +16,44 @@
     {% endif %}
   </div>
   <div class="topbar-actions">
-    <div class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="تغییر تم">
-      <div class="theme-toggle-knob"></div>
-    </div>
     <div style="display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;color:var(--text3)">
       <div class="dot-live" id="dot"></div><span id="dot-txt">Connecting</span>
     </div>
     {% if current_user.is_authenticated and current_user.is_verified and current_user.role in ['admin', 'manager'] and current_user.can_access_module('printers') %}
-    <button class="btn btn-cyan" onclick="triggerPoll()">⟳ Pull</button>
+    <button class="btn btn-cyan" onclick="triggerPoll()" title="Pull دستی">⟳</button>
     {% endif %}
-    {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'admin' and current_user.can_access_module('printers') %}
-    <button class="btn btn-orange" onclick="resetPrinterOrder()">↺ بازنشانی ترتیب</button>
-    <button class="btn btn-green" onclick="showAddModal()">＋ پرینتر</button>
-    {% endif %}
-    {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'admin' and current_user.can_access_module('users') %}
-    <a class="btn btn-cyan" href="{{ url_for('users.users_page') }}">👤 مدیریت کاربران</a>
-    {% endif %}
-    {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'manager' and current_user.can_access_module('excel') %}
-    <button class="btn btn-yellow" onclick="exportExcel()">↓ Excel</button>
-    {% endif %}
-    {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'admin' and current_user.can_access_module('excel') %}
-    <button class="btn btn-yellow" onclick="exportExcel()">↓ Excel</button>
-    <button class="btn btn-orange" onclick="exportJSON()">↓ JSON</button>
-    {% if current_user.is_authenticated %}
-    <a class="btn btn-red" href="{{ url_for('auth.logout') }}">خروج</a>
-    {% endif %}
-    {% elif current_user.is_authenticated %}
-    <a class="btn btn-red" href="{{ url_for('auth.logout') }}">خروج</a>
-    {% endif %}
+
+    <!-- منوی بیشتر -->
+    <div class="topbar-more" id="topbar-more">
+      <button class="btn topbar-more-btn" onclick="toggleTopbarMenu()">⋯</button>
+      <div class="topbar-dropdown" id="topbar-dropdown">
+        <div class="topbar-dropdown-header">{{ username }} — {% if current_user.role == 'admin' %}مدیر{% elif current_user.role == 'manager' %}سرپرست{% else %}بازدید{% endif %}</div>
+        <div class="topbar-dropdown-divider"></div>
+        {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'admin' and current_user.can_access_module('printers') %}
+        <button class="topbar-dropdown-item" onclick="showAddModal();closeTopbarMenu()">＋ افزودن پرینتر</button>
+        {% endif %}
+        {% if current_user.is_authenticated and current_user.is_verified and current_user.role in ['admin', 'manager'] and current_user.can_access_module('excel') %}
+        <button class="topbar-dropdown-item" onclick="exportExcel();closeTopbarMenu()">↓ خروجی Excel</button>
+        {% endif %}
+        {% if current_user.is_authenticated and current_user.is_verified and current_user.role in ['admin'] and current_user.can_access_module('excel') %}
+        <button class="topbar-dropdown-item" onclick="exportJSON();closeTopbarMenu()">📄 خروجی JSON</button>
+        {% endif %}
+        {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'admin' and current_user.can_access_module('printers') %}
+        <button class="topbar-dropdown-item" onclick="resetPrinterOrder();closeTopbarMenu()">↺ بازنشانی ترتیب</button>
+        {% endif %}
+        {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'admin' and current_user.can_access_module('users') %}
+        <a class="topbar-dropdown-item" href="{{ url_for('users.users_page') }}">👤 مدیریت کاربران</a>
+        {% endif %}
+        <div class="topbar-dropdown-divider"></div>
+        <div class="topbar-dropdown-item" onclick="toggleTheme();closeTopbarMenu()">
+          <span id="theme-label">🌙 تم تاریک</span>
+        </div>
+        {% if current_user.is_authenticated %}
+        <div class="topbar-dropdown-divider"></div>
+        <a class="topbar-dropdown-item topbar-dropdown-danger" href="{{ url_for('auth.logout') }}">🚪 خروج</a>
+        {% endif %}
+      </div>
+    </div>
   </div>
 </header>
 <div id="cbar"><div id="cfill" style="width:100%"></div></div>

@@ -328,7 +328,11 @@ def register():
             elif User.find_by_email(email):
                 error = "ایمیل قبلاً ثبت شده است"
             else:
-                user = User.create(username=username, email=email, password=password, is_verified=False)
+                # ✅ خودکارسازی: اولین کاربر = ادمین تأیید‌شده
+                is_first_user = User.total_count() == 0
+                user_role = "admin" if is_first_user else "viewer"
+                user_verified = is_first_user
+                user = User.create(username=username, email=email, password=password, role=user_role, is_verified=user_verified)
                 if user:
                     login_user(user)
                     user.touch_login()

@@ -52,6 +52,24 @@ BROTHER_TONER_OID = "1.3.6.1.4.1.2435.2.3.9.4.2.1.5.5.1.1"
 BROTHER_DRUM_OID = "1.3.6.1.4.1.2435.2.3.9.4.2.1.5.5.1.2"
 
 
+# ─── الگوهای تشخیص رنگ تونر (دقیق‌تر) ─────────────────────────────
+import re as _re
+_TONER_COLOR_PATTERNS = {
+    "black": _re.compile(r'\b(black|bk)\b', _re.IGNORECASE),
+    "cyan": _re.compile(r'\b(cyan)\b', _re.IGNORECASE),
+    "magenta": _re.compile(r'\b(magenta|mgt)\b', _re.IGNORECASE),
+    "yellow": _re.compile(r'\b(yellow)\b', _re.IGNORECASE),
+}
+
+def _detect_toner_color(name: str) -> Optional[str]:
+    """✅ باگ #8: تشخیص دقیق رنگ تونر با regex (جلوگیری از match اشتباه)"""
+    if not name:
+        return None
+    for color, pattern in _TONER_COLOR_PATTERNS.items():
+        if pattern.search(name):
+            return color
+    return None
+
 # ─── توابع کمکی ───────────────────────────────────────────────────
 def _log_to_toner_report(content: str):
     """اضافه کردن خط به فایل toner_report.txt"""
@@ -73,6 +91,54 @@ def _log_validation_error(ip: str, error_type: str, details: str):
         log.error(f"خطا در نوشتن validation log: {e}")
 
 
+def _save_counters_to_db(ip: str, total: int, color, bw, black_level, 
+                          prev_override: dict, device_type: str,
+                          toners: dict, supplies: list, alerts: list):
+    """✅ باگ #12: ذخیره امن در دیتابیس با context manager"""
+    try:
+        from core.database import db_connection
+        with db_connection(commit=True) as conn:
+            conn.execute('''
+                INSERT OR REPLACE INTO printer_counters 
+                (ip, print_total, full_color, black_white, toner_level, 
+                 manual_override, override_color, override_base_level, 
+                 override_start_total, override_start_toner, yield_per_page, 
+                 updated_at, device_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                ip,
+                total,
+                color if color else 0,
+                bw,
+                black_level,
+                prev_override.get('manual_override', 0),
+                prev_override.get('override_color'),
+                prev_override.get('override_base_level'),
+                prev_override.get('override_start_total'),
+                prev_override.get('override_start_toner'),
+                prev_override.get('yield_per_page', 2000),
+                datetime.now().isoformat(),
+                device_type
+            ))
+            
+            # ذخیره اطلاعات تونرها
+            toner_data = {
+                "toners": {
+                    k: {"level": v["level"], "status": v["status"], "name": v.get("name", "")}
+                    for k, v in toners.items()
+                },
+                "supplies": [
+                    {"name": s["name"], "percent": s["percent"], "status": s["status"], "type": s["type_name"]}
+                    for s in supplies if s["percent"] is not None
+                ]
+            }
+            conn.execute('''
+                UPDATE printer_counters SET alert_codes = ?, last_alert_codes = ? WHERE ip = ?
+            ''', (json.dumps(toner_data, ensure_ascii=False), json.dumps([a["code"] for a in alerts]), ip))
+    except Exception as e:
+        log.error(f"خطا در ذخیره enhanced data در دیتابیس: {e}")
+
+
 def detect_snmp_version(ip: str, community: str = "public", timeout: float = 2.0) -> Optional[int]:
     """
     تشخیص نسخه SNMP با تست sysDescr
@@ -90,7 +156,7 @@ def detect_snmp_version(ip: str, community: str = "public", timeout: float = 2.0
         if result is not None and str(result).strip():
             _SNMP_VERSION_CACHE[cache_key] = 2
             return 2
-    except:
+    except Exception:
         pass
     
     # تست v1
@@ -99,7 +165,7 @@ def detect_snmp_version(ip: str, community: str = "public", timeout: float = 2.0
         if result is not None and str(result).strip():
             _SNMP_VERSION_CACHE[cache_key] = 1
             return 1
-    except:
+    except Exception:
         pass
     
     _SNMP_VERSION_CACHE[cache_key] = None
@@ -121,7 +187,7 @@ def try_alternative_oids(ip: str, community: str, brand: str, cartridge_model: s
                             int_val = int(val)
                             if 0 <= int_val <= 100:
                                 return int_val
-                        except:
+                        except Exception:
                             pass
         
         # OIDهای عمومی HP
@@ -137,7 +203,7 @@ def try_alternative_oids(ip: str, community: str, brand: str, cartridge_model: s
                     int_val = int(val)
                     if 0 <= int_val <= 100:
                         return int_val
-                except:
+                except Exception:
                     pass
     
     elif brand == "canon":
@@ -148,7 +214,7 @@ def try_alternative_oids(ip: str, community: str, brand: str, cartridge_model: s
                     int_val = int(val)
                     if 0 <= int_val <= 100:
                         return int_val
-                except:
+                except Exception:
                     pass
     
     return None
@@ -182,7 +248,7 @@ def walk_supplies_table(ip: str, community: str, brand: str = "unknown",
                         "percent": level,
                         "status": "critical" if level <= 10 else "low" if level <= 25 else "ok",
                     })
-            except:
+            except Exception:
                 pass
         
         # درام هم بخوانیم
@@ -204,7 +270,7 @@ def walk_supplies_table(ip: str, community: str, brand: str = "unknown",
                         "percent": level,
                         "status": "critical" if level <= 10 else "low" if level <= 25 else "ok",
                     })
-            except:
+            except Exception:
                 pass
         
         return supplies
@@ -257,13 +323,12 @@ def walk_supplies_table(ip: str, community: str, brand: str = "unknown",
                 if rem_val is not None and str(rem_val).lstrip('-').isdigit():
                     rem_int = int(rem_val)
                 
+                # ✅ باگ #20: فقط وقتی max_int معتبره درصد حساب کن
+                # حذف شرط elif که فرض می‌کرد rem_int بین 0-100 = درصد
                 if max_int > 0 and rem_int >= 0:
                     percent = round(rem_int / max_int * 100)
-                elif rem_int >= 0 and rem_int <= 100:
-                    percent = rem_int
-                    max_int = 100
-            except:
-                pass
+            except (ValueError, TypeError) as e:
+                log.warning(f"Supply conversion error for {ip} idx={idx}: max={max_val}, rem={rem_val}: {e}")
             
             # اگر درصد نداریم، OIDهای جایگزین را امتحان کن
             if percent is None and brand in ["hp", "canon"]:
@@ -273,27 +338,11 @@ def walk_supplies_table(ip: str, community: str, brand: str = "unknown",
                     rem_int = alt_percent
                     max_int = 100
 
-            # اگر هنوز درصد نداریم اما سنسور گزارش نمی‌کند (rem_int == -2)،
-            # تلاش برای برآورد مبتنی بر دلتا شمارنده کل چاپ (اگر موجود باشد).
-            if percent is None and rem_int == -2 and current_total is not None:
-                try:
-                    prev = store._prev.get(ip) or {}
-                    prev_total = prev.get("print_total") if prev else None
-                    yield_pages = prev.get("yield_per_page", DEFAULT_CARTRIDGE_YIELD)
-                    if prev_total is not None and isinstance(prev_total, int) and current_total >= prev_total:
-                        pages_used = current_total - prev_total
-                    else:
-                        # اگر مقدار قبلی نداریم، برآورد محافظه‌کارانه با استفاده از modulo از total
-                        try:
-                            pages_used = current_total % yield_pages
-                        except Exception:
-                            pages_used = 0
-                    est_remaining = max(0, yield_pages - pages_used)
-                    percent = round(est_remaining / yield_pages * 100)
-                    rem_int = est_remaining
-                    max_int = yield_pages
-                except Exception:
-                    pass
+            # ✅ باگ #6: حذف برآورد تونر بدون سنسور (فرمول modulo کاملاً غلط بود)
+            # وقتی سنسور در دسترس نیست، null نمایش بده
+            if percent is None and rem_int == -2:
+                status = "no_sensor"
+                log.info(f"  [{ip}] Supply {idx} ({name_str}): no sensor data available")
             
             # وضعیت
             status = "N/A"
@@ -365,7 +414,7 @@ def walk_input_trays(ip: str, community: str, snmp_version: int = None, timeout:
             
             try:
                 cap_int = int(cap_val) if cap_val is not None and str(cap_val).lstrip('-').isdigit() else 0
-            except:
+            except Exception:
                 cap_int = 0
             
             try:
@@ -373,7 +422,7 @@ def walk_input_trays(ip: str, community: str, snmp_version: int = None, timeout:
                     level_int = int(level_val)
                 else:
                     level_int = -2
-            except:
+            except Exception:
                 level_int = -2
             
             fill_percent = None
@@ -533,7 +582,7 @@ def _save_oid_profile(ip: str, community: str, snmp_version: int, model: str,
                 if s:
                     profile["summary"]["serial"] = str(s)
                     break
-            except:
+            except Exception:
                 continue
 
         path = os.path.join(os.getcwd(), "oid_profiles.json")
@@ -620,7 +669,7 @@ def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
         return result
     
     # ─── شمارنده‌های اصلی ─────────────────────────────────────────
-    # تلاش برای خواندن total از OIDهای مختلف (برای برآورد تونر در صورت نبود سنسور)
+    # تلاش برای خواندن total از OIDهای مختلف
     total = 0
     total_oids = [
         "1.3.6.1.2.1.43.10.2.1.4.1.1",  # standard
@@ -631,10 +680,14 @@ def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
         if val is not None:
             try:
                 total = int(val)
-                if total > 0:
+                # ✅ باگ #12: validation مقدار total (جلوگیری از مقادیر منفی)
+                if total < 0:
+                    log.warning(f"Negative total ({total}) for {ip}, using 0")
+                    total = 0
+                elif total > 0:
                     break
-            except:
-                pass
+            except (ValueError, TypeError) as e:
+                log.warning(f"Total conversion error for {ip}: {val!r}: {e}")
 
     # ─── خواندن اطلاعات پیشرفته ───────────────────────────────────
     supplies = walk_supplies_table(ip, community, brand, snmp_version, timeout=ENHANCED_TIMEOUT, current_total=total)
@@ -656,9 +709,18 @@ def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
                     color = int(val)
                     if color > 0:
                         break
-                except:
+                except Exception:
                     pass
-        bw = max(0, total - color) if total > 0 else 0
+        # ✅ باگ #16: validation مقدار color (جلوگیری از color > total)
+        if color > total and total > 0:
+            log.warning(f"color ({color}) > total ({total}) for {ip}, correcting")
+            color = None
+            bw = total
+        elif color > 0:
+            bw = max(0, total - color)
+        else:
+            color = None
+            bw = total
     else:
         color = None
         bw = total
@@ -696,18 +758,8 @@ def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
     toners = {}
     for s in supplies:
         if s["type_name"] in ("toner", "cartridge"):
-            color_key = None
-            name_lower = s["name"].lower()
-            if "black" in name_lower or "bk" in name_lower:
-                color_key = "black"
-            elif "cyan" in name_lower or "c" in name_lower.split():
-                color_key = "cyan"
-            elif "magenta" in name_lower or "m" in name_lower.split():
-                color_key = "magenta"
-            elif "yellow" in name_lower or "y" in name_lower.split():
-                color_key = "yellow"
-            else:
-                color_key = "black"  # fallback
+            # ✅ باگ #8: استفاده از تشخیص رنگ دقیق با regex
+            color_key = _detect_toner_color(s["name"]) or "black"
 
             display_level = _canon_display_percent(model, s["name"], s["percent"])
             
@@ -771,66 +823,12 @@ def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
     except Exception:
         log.debug("Saving oid profile failed, continuing")
     
-    # ─── ذخیره در دیتابیس (printer_counters) ────────────────────
-    if save_to_db:
-        try:
-            import sqlite3
-            conn = sqlite3.connect(DB_PATH, timeout=10.0)
-            c = conn.cursor()
-
-            black_level = None
-            if toners.get("black", {}).get("level") is not None:
-                black_level = toners["black"]["level"]
-            else:
-                for t in toners.values():
-                    if t.get("level") is not None:
-                        black_level = t["level"]
-                        break
-            
-            # ذخیره مقادیر قبلی در جدول printer_counters و حفظ metadata override
-            c.execute('''
-                INSERT OR REPLACE INTO printer_counters 
-                (ip, print_total, full_color, black_white, toner_level, manual_override, override_color, override_base_level, override_start_total, override_start_toner, yield_per_page, updated_at, device_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                ip,
-                total,
-                color if color else 0,
-                bw,
-                black_level,
-                prev_override.get('manual_override', 0),
-                prev_override.get('override_color'),
-                prev_override.get('override_base_level'),
-                prev_override.get('override_start_total'),
-                prev_override.get('override_start_toner'),
-                prev_override.get('yield_per_page', 2000),
-                datetime.now().isoformat(),
-                device_type
-            ))
-            
-            # ذخیره اطلاعات تونرها در فیلد alert_codes (JSON)
-            # این کار اطلاعات تونر را هم نگهداری می‌کند
-            import json
-            toner_data = {
-                "toners": {
-                    k: {"level": v["level"], "status": v["status"], "name": v["name"]}
-                    for k, v in toners.items()
-                },
-                "supplies": [
-                    {"name": s["name"], "percent": s["percent"], "status": s["status"], "type": s["type_name"]}
-                    for s in supplies if s["percent"] is not None
-                ]
-            }
-            c.execute('''
-                UPDATE printer_counters SET alert_codes = ?, last_alert_codes = ? WHERE ip = ?
-            ''', (json.dumps(toner_data, ensure_ascii=False), json.dumps([a["code"] for a in alerts]), ip))
-            
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            log.error(f"خطا در ذخیره enhanced data در دیتابیس: {e}")
+    # ✅ باگ #2 + #5 + #12: حذف نوشتن مستقیم DB
+    # نوشتن در دیتابیس حالا بعد از _counters_event انجام می‌شه
+    # (به خطوط بعدی مراجعه کنید)
     
     # ─── ثبت رویداد PRINT / REFILL ────────────────────────────────
+    # ✅ باگ #2: ثبت رویداد BEFORE نوشتن در دیتابیس
     prev = store._prev.get(ip) or {}
     black_level = None
     if toners.get("black", {}).get("level") is not None:
@@ -841,10 +839,16 @@ def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
                 black_level = t["level"]
                 break
     prev_toner = prev.get("toner_level")
+    
+    # ✅ باگ #2: ثبت رویداد اول (قبل از نوشتن DB)
     _counters_event(ip, total, prev, alerts, [a["code"] for a in alerts],
                     full_color=color, black_white=bw, paper_size=None,
                     current_toner_level=black_level, prev_toner_level=prev_toner,
                     uptime=ut)
+    
+    # ✅ باگ #2 + #5: نوشتن در دیتابیس فقط بعد از موفقیت رویداد
+    if save_to_db:
+        _save_counters_to_db(ip, total, color, bw, black_level, prev_override, device_type, toners, supplies, alerts)
     
     return {
         "ip": ip, "name": name, "nickname": nickname, "brand": brand,
@@ -862,14 +866,14 @@ def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
             "total": total,
             "full_color": color if color else None,
             "black_white": bw,
-            "printer": total,
-            "copy": total,  # استفاده از total به جای None
-            "fax": None,    # fax معمولاً شامل نمی‌شود
-            "list": total,  # استفاده از total به جای None
-            "scan_fc": None,      # عموماً در دسترس نیست
-            "scan_bw": None,      # عموماً در دسترس نیست
-            "scan_net_fc": None,  # عموماً در دسترس نیست
-            "scan_net_bw": None,  # عموماً در دسترس نیست
+            "printer": None,  # ✅ باگ #7: وقتی OID در دسترس نیست، None نمایش بده
+            "copy": None,     # ✅ باگ #7: وقتی OID در دسترس نیست، None نمایش بده
+            "fax": None,
+            "list": None,     # ✅ باگ #7: وقتی OID در دسترس نیست، None نمایش بده
+            "scan_fc": None,
+            "scan_bw": None,
+            "scan_net_fc": None,
+            "scan_net_bw": None,
         },
         "paper_sizes": {},
         "trays": trays,

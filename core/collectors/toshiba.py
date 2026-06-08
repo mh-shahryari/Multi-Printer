@@ -17,6 +17,10 @@ log = logging.getLogger("PrinterMonitor")
 
 NE_LEVEL = {5: 25, 6: 20, 7: 10, 8: 0, 9: 5}
 
+# ✅ باگ #10: کش HTTP scrape برای کاهش timeout و افزایش دقت
+_toner_scrape_cache = {}  # ip → (timestamp, result)
+_TONER_CACHE_TTL = 300  # ۵ دقیقه
+
 # تنظیمات validation log
 from config.settings import VALIDATION_LOG_FILE
 
@@ -33,6 +37,14 @@ def _log_validation_error(ip: str, error_type: str, details: str):
 
 def _scrape_toshiba_toners(ip: str, timeout: float = 4.0):
     """درصد دقیق تونر را از پنل TopAccess می‌خواند."""
+    # ✅ باگ #10: بررسی کش قبل از درخواست HTTP
+    now = time.time()
+    if ip in _toner_scrape_cache:
+        ts, cached_result = _toner_scrape_cache[ip]
+        if now - ts < _TONER_CACHE_TTL:
+            log.debug(f"Toshiba toner cache hit for {ip}")
+            return cached_result
+    
     html = None
     url = f"http://{ip}/?MAIN=DEVICE"
 
@@ -102,6 +114,8 @@ def _scrape_toshiba_toners(ip: str, timeout: float = 4.0):
 
     if result and all(0 <= v <= 100 for v in result.values()):
         log.debug(f"Toshiba toner scrape {ip}: {result}")
+        # ✅ باگ #10: ذخیره در کش
+        _toner_scrape_cache[ip] = (time.time(), result)
         return result
 
     log.debug(f"Toshiba toner scrape {ip}: نتیجه‌ای یافت نشد")
@@ -320,8 +334,15 @@ def collect_toshiba(ip: str, name: str, community: str, start: float) -> dict:
             log.warning(f"Toshiba {ip}: retry successful → total={retry_total}")
             total = retry_total
         else:
-            log.error(f"Toshiba {ip}: retry also failed, keeping prev_total={prev_total}")
-            total = prev_total
+            # ✅ باگ #10: ثبت خطا و نگهداری total=0 (نه prev_total)
+            log.error(f"Toshiba {ip}: retry also failed, recording SNMP error")
+            add_event(ip, "SNMP_ERROR", {
+                "message": f"SNMP total=0 and retry failed for {ip}",
+                "severity": "error",
+                "prev_total": prev_total,
+            })
+            # total رو 0 نگه دار تا در poll بعدی دوباره تلاش بشه
+            # اگر prev_total رو برگردونیم، چاپ‌های واقعی گم می‌شن
 
     color = si(raw.get("print_fc"))
     bw = si(raw.get("print_bw"))
@@ -377,10 +398,11 @@ def collect_toshiba(ip: str, name: str, community: str, start: float) -> dict:
                 black_level = t["level"]
                 break
     prev_toner = prev.get("toner_level")
+    # ✅ باگ #11: پاس دادن a3_total و a4_total به _counters_event
     _counters_event(ip, total, prev, alerts, curr_codes,
                     full_color=color, black_white=bw, paper_size=paper_size,
                     current_toner_level=black_level, prev_toner_level=prev_toner,
-                    uptime=ut)
+                    uptime=ut, a3_total=a3_total, a4_total=a4_total)
 
     c_warns = validate_counter_consistency(
         {"total": total, "full_color": color, "black_white": bw,

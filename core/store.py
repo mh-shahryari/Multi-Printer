@@ -65,22 +65,26 @@ class PrevStore:
     def set(self, ip: str, data: dict):
         """ذخیره مقادیر جدید برای یک پرینتر (در کش و دیتابیس)."""
         with self._lock:
-            existing = self._cache.get(ip) or load_printer_counters(ip) or {}
-            normalized = {
-                "toner_level": existing.get("toner_level"),
-                "last_alert_codes": existing.get("last_alert_codes", []),
-                "manual_override": existing.get("manual_override", 0),
-                "override_color": existing.get("override_color"),
-                "override_base_level": existing.get("override_base_level"),
-                "override_start_total": existing.get("override_start_total"),
-                "override_start_toner": existing.get("override_start_toner"),
-                "yield_per_page": existing.get("yield_per_page", 2000),
-                **existing,
-                **data
-            }
-            self._cache[ip] = normalized.copy()
-            save_printer_counters(ip, normalized)
-            log.debug(f"PrevStore.set: {ip} -> total={normalized.get('print_total')} toner={normalized.get('toner_level')} last_alerts={normalized.get('last_alert_codes')}")
+            try:
+                existing = self._cache.get(ip) or load_printer_counters(ip) or {}
+                # ✅ اصلاح: ادغام امن با حفظ مقادیر مهم override
+                normalized = {
+                    "toner_level": existing.get("toner_level"),
+                    "last_alert_codes": existing.get("last_alert_codes", []),
+                    "manual_override": existing.get("manual_override", 0),
+                    "override_color": existing.get("override_color"),
+                    "override_base_level": existing.get("override_base_level"),
+                    "override_start_total": existing.get("override_start_total"),
+                    "override_start_toner": existing.get("override_start_toner"),
+                    "yield_per_page": existing.get("yield_per_page", 2000),
+                    **existing,
+                    **data
+                }
+                self._cache[ip] = normalized.copy()
+                save_printer_counters(ip, normalized)
+                log.debug(f"PrevStore.set: {ip} -> total={normalized.get('print_total')} toner={normalized.get('toner_level')}")
+            except Exception as e:
+                log.error(f"PrevStore.set error for {ip}: {e}")
 
     def delete(self, ip: str):
         """حذف مقادیر یک پرینتر (در صورت حذف پرینتر)."""

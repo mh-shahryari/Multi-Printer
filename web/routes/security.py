@@ -2,7 +2,7 @@
 Endpoint های نمایش لاگ‌های امنیتی (فقط برای admin).
 """
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, render_template
 
 from web.auth import admin_required
 from core.security_audit import get_recent_events, SecurityEvent
@@ -73,11 +73,28 @@ def api_security_stats():
                 "SELECT COUNT(*) FROM security_events WHERE severity='critical' AND timestamp>=?",
                 (cutoff_7d,),
             ).fetchone()[0]
+        # Total events and warnings in 7 days
+        total_7d = conn.execute(
+            "SELECT COUNT(*) FROM security_events WHERE timestamp>=?",
+            (cutoff_7d,),
+        ).fetchone()[0]
+        warnings_7d = conn.execute(
+            "SELECT COUNT(*) FROM security_events WHERE severity IN ('warning','critical') AND timestamp>=?",
+            (cutoff_7d,),
+        ).fetchone()[0]
         return jsonify({
             "failed_logins_24h": failed_24h,
             "successful_logins_24h": success_24h,
             "critical_events_7d": critical_7d,
+            "total_events_7d": total_7d,
+            "warnings_7d": warnings_7d,
             "top_failed_ips_7d": [{"ip": r[0], "count": r[1]} for r in top_ips],
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@bp.route("/security", methods=["GET"])
+@admin_required
+def security_page():
+    """صفحه امنیت"""
+    return render_template("security.html", load_dashboard_scripts=True)

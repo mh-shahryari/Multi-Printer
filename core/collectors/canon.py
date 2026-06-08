@@ -273,8 +273,14 @@ def collect_canon(ip: str, name: str, community: str, start: float) -> dict:
                 log.warning(f"Canon {ip}: retry successful → total={retry_total}")
                 total = retry_total
             else:
-                log.error(f"Canon {ip}: retry also failed, keeping prev_total={prev_total}")
-                total = prev_total  # حفظ مقدار قبلی به‌جای 0
+                # ✅ باگ: ثبت خطا و نگهداری total=0 (نه prev_total)
+                log.error(f"Canon {ip}: retry also failed, recording SNMP error")
+                from core.database import add_event
+                add_event(ip, "SNMP_ERROR", {
+                    "message": f"SNMP total=0 and retry failed for {ip}",
+                    "severity": "error",
+                    "prev_total": prev_total,
+                })
 
         # محاسبه full_color و black_white
         full_color = None

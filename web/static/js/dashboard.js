@@ -12,6 +12,7 @@ function toggleTheme() {
   const html = document.documentElement;
   const isLight = html.classList.toggle('light');
   localStorage.setItem('dashboard-theme', isLight ? 'light' : 'dark');
+  updateThemeLabel();
   
   try {
     if (typeof Chart !== 'undefined') {
@@ -33,6 +34,27 @@ function toggleTheme() {
     console.warn('Chart theme update skipped:', e);
   }
 }
+
+function updateThemeLabel() {
+  const el = document.getElementById('theme-label');
+  if (!el) return;
+  const isLight = document.documentElement.classList.contains('light');
+  el.textContent = isLight ? '🌙 تم تاریک' : '☀️ تم روشن';
+}
+
+// ─── Topbar Dropdown Menu ────────────────────────
+function toggleTopbarMenu() {
+  const el = document.getElementById('topbar-more');
+  if (el) el.classList.toggle('open');
+}
+function closeTopbarMenu() {
+  const el = document.getElementById('topbar-more');
+  if (el) el.classList.remove('open');
+}
+document.addEventListener('click', function(e) {
+  const el = document.getElementById('topbar-more');
+  if (el && !el.contains(e.target)) el.classList.remove('open');
+});
 
 // ══════════════════════════════════════════════════
 // UTILITIES

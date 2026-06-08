@@ -54,8 +54,14 @@ def collect_brother(ip: str, name: str, community: str, start: float) -> dict:
                 log.warning(f"Brother {ip}: retry successful → total={retry_total}")
                 total = retry_total
             else:
-                log.error(f"Brother {ip}: retry failed, keeping prev_total={prev_total}")
-                total = prev_total
+                # ✅ باگ: ثبت خطا و نگهداری total=0 (نه prev_total)
+                log.error(f"Brother {ip}: retry failed, recording SNMP error")
+                from core.database import add_event
+                add_event(ip, "SNMP_ERROR", {
+                    "message": f"SNMP total=0 and retry failed for {ip}",
+                    "severity": "error",
+                    "prev_total": prev_total,
+                })
 
         color_raw = si(g("1.3.6.1.2.1.43.10.2.1.4.1.2"), -1)
 

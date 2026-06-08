@@ -1,4 +1,4 @@
-# core/poller.py
+# core/poller.py (PATCHED - All Critical Bugs Fixed)
 
 """
 چرخه polling:
@@ -9,6 +9,7 @@
 
 import time
 import threading
+from threading import Lock
 import logging
 from datetime import datetime
 
@@ -29,6 +30,9 @@ log = logging.getLogger("PrinterMonitor")
 
 # قفل برای جلوگیری از اجرای هم‌زمان poll_all
 _polling_lock = threading.Lock()
+
+# ✅ باگ #1: قفل جداگانه برای processed_ips (جلوگیری از Race Condition)
+_processed_ips_lock = Lock()
 
 
 def collect(printer: dict) -> dict:
@@ -96,7 +100,9 @@ def collect(printer: dict) -> dict:
         return result
     except Exception as e:
         log.error(f"Enhanced collector failed for {ip}: {e}, falling back to basic")
-        # Fallback به اطلاعات پایه در صورت خطا
+        # ✅ باگ #3: حفظ مقدار قبلی به جای total=0 (جلوگیری از از دست رفتن چاپ)
+        prev = store._prev.get(ip) or {}
+        prev_total = prev.get("print_total", 0) or 0
         elapsed = int((time.time() - start) * 1000)
         return {
             "ip": ip, "name": name, "nickname": nickname, "brand": brand,
@@ -104,7 +110,11 @@ def collect(printer: dict) -> dict:
             "last_poll": datetime.now().isoformat(),
             "poll_ms": elapsed,
             "device": {"model": "Unknown", "serial": "N/A", "firmware": "N/A", "uptime_str": "N/A"},
-            "counters": {"total": 0, "full_color": None, "black_white": 0},
+            "counters": {
+                "total": prev_total,  # ✅ حفظ مقدار قبلی به جای 0
+                "full_color": prev.get("full_color"),
+                "black_white": prev.get("black_white", 0),
+            },
             "paper_sizes": {}, "trays": [], "toners": {}, "alerts": [],
             "error": str(e),
         }
@@ -129,15 +139,22 @@ def poll_all():
 
         def _poll(p):
             ip = p["ip"]
-            if ip not in processed_ips:
+            # ✅ باگ #1: Race Condition - استفاده از قفل برای جلوگیری از polling مضاعف
+            with _processed_ips_lock:
+                if ip in processed_ips:
+                    log.warning(f"Skipping duplicate poll for {ip}")
+                    return
                 processed_ips.add(ip)
+            try:
                 results[ip] = collect(p)
+            except Exception as e:
+                log.error(f"Error polling {ip}: {e}")
 
         threads = [threading.Thread(target=_poll, args=(p,), daemon=True) for p in current]
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=45)  # افزایش timeout به 45 ثانیه
+            t.join(timeout=60)  # ✅ افزایش timeout به 60 ثانیه
 
         with store.data_lock:
             store.printer_data.update(results)

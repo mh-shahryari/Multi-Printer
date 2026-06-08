@@ -200,7 +200,7 @@ def parse_snmp_response(data: bytes, expected_request_id=None):
         elif vt == 0x04:
             try:
                 return vb.decode('utf-8').strip('\x00').strip()
-            except:
+            except Exception:
                 return vb.hex()
         elif vt in (0x41, 0x42, 0x43, 0x44):
             return int.from_bytes(vb, 'big')

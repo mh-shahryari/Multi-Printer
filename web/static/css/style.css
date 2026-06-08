@@ -938,6 +938,85 @@ html.light .offline-message { color: #000000; }
   font-weight: 600;
   color: var(--text3);
 }
+
+/* ── منوی کشویی هدر ── */
+.topbar-more {
+  position: relative;
+}
+.topbar-more-btn {
+  padding: 4px 10px !important;
+  font-size: 16px !important;
+  font-weight: 700 !important;
+  letter-spacing: 1px;
+  line-height: 1;
+  border-radius: 8px !important;
+  transition: all .2s;
+}
+.topbar-more-btn:hover {
+  background: var(--bg3) !important;
+  border-color: var(--cyan) !important;
+  color: var(--cyan) !important;
+}
+.topbar-dropdown {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  min-width: 180px;
+  background: var(--bg2);
+  border: 1px solid var(--bdr2);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.3);
+  overflow: hidden;
+  z-index: 300;
+  animation: dropdownIn 0.15s ease;
+}
+.topbar-more.open .topbar-dropdown {
+  display: block;
+}
+@keyframes dropdownIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.topbar-dropdown-header {
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--cyan);
+  border-bottom: 1px solid var(--border);
+}
+.topbar-dropdown-divider {
+  height: 1px;
+  background: var(--border);
+}
+.topbar-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 14px;
+  background: none;
+  border: none;
+  color: var(--text2);
+  font-family: var(--sans);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all .15s;
+  text-align: right;
+  text-decoration: none;
+}
+.topbar-dropdown-item:hover {
+  background: var(--bg3);
+  color: var(--text);
+}
+.topbar-dropdown-danger {
+  color: var(--red);
+}
+.topbar-dropdown-danger:hover {
+  background: rgba(255,61,61,.1);
+}
 .sensor-card {
   text-align: center;
   min-height: 220px;

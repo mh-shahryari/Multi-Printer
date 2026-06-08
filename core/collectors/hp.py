@@ -60,8 +60,14 @@ def collect_hp(ip: str, name: str, community: str, start: float) -> dict:
                 log.warning(f"HP {ip}: retry successful → total={retry_total}")
                 total = retry_total
             else:
-                log.error(f"HP {ip}: retry also failed, keeping prev_total={prev_total}")
-                total = prev_total
+                # ✅ باگ: ثبت خطا و نگهداری total=0 (نه prev_total)
+                log.error(f"HP {ip}: retry also failed, recording SNMP error")
+                from core.database import add_event
+                add_event(ip, "SNMP_ERROR", {
+                    "message": f"SNMP total=0 and retry failed for {ip}",
+                    "severity": "error",
+                    "prev_total": prev_total,
+                })
 
         color_print = si(g("1.3.6.1.4.1.11.2.3.9.6.1.1.5.1"), -1)
         copy_mono   = si(g("1.3.6.1.4.1.11.2.3.9.6.1.1.9.1"), -1)
