@@ -185,6 +185,8 @@ def init_db():
             override_start_total INTEGER,
             override_start_toner INTEGER,
             yield_per_page INTEGER DEFAULT 2000,
+            force_estimate INTEGER DEFAULT 0,
+            yield_learning_failures INTEGER DEFAULT 0,
             last_alert_codes TEXT,
             a3_total INTEGER,
             a4_total INTEGER,
@@ -226,9 +228,30 @@ def init_db():
     except sqlite3.OperationalError:
         pass
     try:
+        c.execute("ALTER TABLE printer_counters ADD COLUMN force_estimate INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE printer_counters ADD COLUMN yield_learning_failures INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
         c.execute("ALTER TABLE printer_counters ADD COLUMN last_alert_codes TEXT DEFAULT NULL")
     except sqlite3.OperationalError:
         pass
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS toner_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            printer_ip TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            print_total INTEGER,
+            toner_level INTEGER,
+            yield_per_page INTEGER,
+            source TEXT DEFAULT 'poll'
+        )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_toner_history_ip_ts ON toner_history(printer_ip, timestamp)')
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -682,6 +705,8 @@ def ensure_printer_counters_columns():
         "ALTER TABLE printer_counters ADD COLUMN override_start_total INTEGER",
         "ALTER TABLE printer_counters ADD COLUMN override_start_toner INTEGER",
         "ALTER TABLE printer_counters ADD COLUMN yield_per_page INTEGER DEFAULT 2000",
+        "ALTER TABLE printer_counters ADD COLUMN force_estimate INTEGER DEFAULT 0",
+        "ALTER TABLE printer_counters ADD COLUMN yield_learning_failures INTEGER DEFAULT 0",
         "ALTER TABLE printer_counters ADD COLUMN last_alert_codes TEXT DEFAULT NULL",
     )
     try:
@@ -712,9 +737,10 @@ def prune_old_print_logs(days=90) -> int:
 
 # نام ستون‌های printer_counters (برای جلوگیری از تکرار)
 _COUNTERS_COLS = (
-    "print_total, full_color, black_white, toner_level, manual_override, "
+    "device_type, print_total, full_color, black_white, toner_level, manual_override, "
     "override_color, override_base_level, override_start_total, override_start_toner, "
-    "yield_per_page, last_alert_codes, a3_total, a4_total, alert_codes"
+    "yield_per_page, force_estimate, yield_learning_failures, last_alert_codes, "
+    "a3_total, a4_total, alert_codes, updated_at"
 )
 
 
@@ -729,20 +755,24 @@ def load_printer_counters(ip: str) -> Optional[dict]:
         if not row:
             return None
         return {
-            "print_total": row[0],
-            "full_color": row[1],
-            "black_white": row[2],
-            "toner_level": row[3],
-            "manual_override": row[4] or 0,
-            "override_color": row[5],
-            "override_base_level": row[6],
-            "override_start_total": row[7],
-            "override_start_toner": row[8],
-            "yield_per_page": row[9] if row[9] is not None else 2000,
-            "last_alert_codes": json.loads(row[10]) if row[10] else [],
-            "a3_total": row[11],
-            "a4_total": row[12],
-            "alert_codes": json.loads(row[13]) if row[13] else [],
+            "device_type": row[0],
+            "print_total": row[1],
+            "full_color": row[2],
+            "black_white": row[3],
+            "toner_level": row[4],
+            "manual_override": row[5] or 0,
+            "override_color": row[6],
+            "override_base_level": row[7],
+            "override_start_total": row[8],
+            "override_start_toner": row[9],
+            "yield_per_page": row[10] if row[10] is not None else 2000,
+            "force_estimate": row[11] or 0,
+            "yield_learning_failures": row[12] or 0,
+            "last_alert_codes": _load_json_list(row[13]),
+            "a3_total": row[14],
+            "a4_total": row[15],
+            "alert_codes": _load_json_list(row[16]),
+            "updated_at": row[17],
         }
     except Exception as e:
         log.exception(f"Error loading counters for {ip}: {e}")
@@ -752,16 +782,19 @@ def load_printer_counters(ip: str) -> Optional[dict]:
 def save_printer_counters(ip: str, data: dict):
     """ذخیره مقادیر شمارنده در دیتابیس"""
     ensure_printer_counters_columns()
+    updated_at = data.get("updated_at") or datetime.now().isoformat()
     try:
         with db_connection(commit=True) as conn:
             conn.execute('''
                 INSERT OR REPLACE INTO printer_counters
-                (ip, print_total, full_color, black_white, toner_level, manual_override,
+                (ip, device_type, print_total, full_color, black_white, toner_level, manual_override,
                  override_color, override_base_level, override_start_total, override_start_toner,
-                 yield_per_page, last_alert_codes, a3_total, a4_total, alert_codes, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 yield_per_page, force_estimate, yield_learning_failures,
+                 last_alert_codes, a3_total, a4_total, alert_codes, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 ip,
+                data.get("device_type"),
                 data.get("print_total"),
                 data.get("full_color"),
                 data.get("black_white"),
@@ -772,11 +805,171 @@ def save_printer_counters(ip: str, data: dict):
                 data.get("override_start_total"),
                 data.get("override_start_toner"),
                 data.get("yield_per_page", 2000),
+                data.get("force_estimate", 0),
+                data.get("yield_learning_failures", 0),
                 json.dumps(data.get("last_alert_codes", [])),
                 data.get("a3_total"),
                 data.get("a4_total"),
                 json.dumps(data.get("alert_codes", [])),
-                datetime.now().isoformat(),
+                updated_at,
             ))
     except Exception as e:
         log.exception(f"Error saving counters for {ip}: {e}")
+
+
+def record_toner_snapshot(ip: str, print_total: int = None, toner_level: int = None,
+                         yield_per_page: int = None, timestamp: str = None,
+                         source: str = "poll"):
+    """ذخیره snapshot از شمارنده/تونر برای یادگیری تاریخی yield."""
+    if print_total is None and toner_level is None:
+        return
+    try:
+        with db_connection(commit=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO toner_history (printer_ip, timestamp, print_total, toner_level, yield_per_page, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ip,
+                    timestamp or datetime.now().isoformat(),
+                    print_total,
+                    toner_level,
+                    yield_per_page,
+                    source,
+                ),
+            )
+    except Exception as e:
+        log.exception(f"Error recording toner snapshot for {ip}: {e}")
+
+
+def estimate_yield_from_history(ip: str, days: int = 7, min_points: int = 3, min_pages: int = 500):
+    """تخمین yield_per_page از روی snapshotهای تاریخی toner_history."""
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    try:
+        with db_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT timestamp, print_total, toner_level
+                FROM toner_history
+                WHERE printer_ip = ? AND timestamp >= ?
+                ORDER BY timestamp ASC
+                """,
+                (ip, cutoff),
+            ).fetchall()
+        if len(rows) < 2:
+            return None
+
+        total_pages = 0
+        total_drop = 0
+        sample_points = 0
+        days_seen = set()
+        prev_total = None
+        prev_toner = None
+        for ts, print_total, toner_level in rows:
+            if ts:
+                days_seen.add(str(ts)[:10])
+            if print_total is None or toner_level is None:
+                prev_total, prev_toner = print_total, toner_level
+                continue
+            if prev_total is None or prev_toner is None:
+                prev_total, prev_toner = print_total, toner_level
+                continue
+            delta_pages = int(print_total) - int(prev_total)
+            toner_drop = int(prev_toner) - int(toner_level)
+            if delta_pages > 0 and toner_drop > 0:
+                total_pages += delta_pages
+                total_drop += toner_drop
+                sample_points += 1
+            prev_total, prev_toner = print_total, toner_level
+
+        if total_drop <= 0:
+            return None
+        if sample_points < min_points and total_pages < min_pages and len(days_seen) < min_points:
+            return None
+
+        estimated_yield = int(round(total_pages * 100.0 / total_drop))
+        if not 300 <= estimated_yield <= 20000:
+            return None
+        return {
+            "yield_per_page": estimated_yield,
+            "sample_points": sample_points,
+            "total_pages": total_pages,
+            "total_drop": total_drop,
+            "days_seen": len(days_seen),
+        }
+    except Exception as e:
+        log.exception(f"Error estimating historical yield for {ip}: {e}")
+        return None
+
+
+def get_reset_history(ip=None, limit: int = 1000, ips=None, current_totals=None) -> list:
+    """دریافت تاریخچه تنظیم مجدد کارتریج‌ها برای گزارش‌گیری Excel."""
+    try:
+        params = ['REFILL']
+        conditions = ["type = ?"]
+        if ips:
+            ips = [str(item).strip() for item in ips if str(item).strip()]
+            if not ips:
+                return []
+            placeholders = ",".join(["?"] * len(ips))
+            conditions.append(f"printer_ip IN ({placeholders})")
+            params.extend(ips)
+        elif ip:
+            conditions.append("printer_ip = ?")
+            params.append(ip)
+
+        query = f'''
+            SELECT printer_ip, printer_name, timestamp, type, message,
+                   pages, color, code, severity, paper_size, username, details
+            FROM logs
+            WHERE {' AND '.join(conditions)}
+            ORDER BY printer_ip ASC, timestamp ASC
+        '''
+        with db_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        events = [_row_to_dict(r) for r in rows]
+        events = [e for e in events if e.get('manual_reset')]
+        if not events:
+            return []
+
+        current_totals = current_totals or {}
+        grouped = {}
+        for ev in events:
+            grouped.setdefault(ev.get('printer_ip'), []).append(ev)
+
+        history = []
+        for printer_ip, printer_events in grouped.items():
+            printer_events.sort(key=lambda ev: ev.get('timestamp') or '')
+            for idx, event in enumerate(printer_events):
+                total_at_reset = event.get('total_at_reset')
+                next_total = None
+                if idx + 1 < len(printer_events):
+                    next_total = printer_events[idx + 1].get('total_at_reset')
+                else:
+                    next_total = current_totals.get(printer_ip)
+                    if next_total is None:
+                        counters = load_printer_counters(printer_ip) or {}
+                        next_total = counters.get('print_total')
+                try:
+                    printed_after = int(next_total) - int(total_at_reset) if next_total is not None and total_at_reset is not None else None
+                except (TypeError, ValueError):
+                    printed_after = None
+                if printed_after is not None and printed_after < 0:
+                    printed_after = 0
+                history.append({
+                    'timestamp': event.get('timestamp'),
+                    'printer_ip': printer_ip,
+                    'printer_name': event.get('printer_name'),
+                    'color': event.get('reset_color') or event.get('color') or '',
+                    'set_level': event.get('set_level'),
+                    'total_pages_at_reset': total_at_reset,
+                    'pages_printed_after_reset': printed_after,
+                    'pages_per_1pct': event.get('yield_per_page_at_reset') or event.get('yield_per_page'),
+                })
+
+        history.sort(key=lambda item: item.get('timestamp') or '', reverse=True)
+        return history[:limit]
+    except Exception as e:
+        log.exception(f"Error building reset history: {e}")
+        return []

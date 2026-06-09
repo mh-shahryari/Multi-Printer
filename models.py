@@ -158,13 +158,15 @@ class User(UserMixin):
     def can_access_module(self, module_name: str) -> bool:
         if self.role == "admin":
             return True
-        allowed = [str(item).strip() for item in (self.allowed_modules or []) if str(item).strip()]
+        module_name = str(module_name or "").strip().lower()
+        allowed = [str(item).strip().lower() for item in (self.allowed_modules or []) if str(item).strip()]
         return not allowed or module_name in allowed
 
     def can_access_office(self, office_id: str) -> bool:
         if self.role == "admin":
             return True
-        allowed = [str(item).strip() for item in (self.allowed_offices or []) if str(item).strip()]
+        office_id = str(office_id or "").strip().lower()
+        allowed = [str(item).strip().lower() for item in (self.allowed_offices or []) if str(item).strip()]
         return not allowed or office_id in allowed
 
     def set_verified(self, is_verified: bool) -> bool:

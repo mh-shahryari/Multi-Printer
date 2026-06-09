@@ -8,7 +8,9 @@
 """
 
 import logging
-from config.settings import POLL_INTERVAL
+from datetime import datetime
+
+from config.settings import POLL_INTERVAL, TONER_ALERT_THRESHOLDS
 from core.snmp.protocol import snmp_get_with_fallback
 from core import store
 from core.database import add_event
@@ -23,6 +25,25 @@ MAX_REASONABLE_DELTA = max(100, int(_BASE_MAX_PER_30S * (POLL_INTERVAL / 30.0)))
 MIN_DELTA_FOR_FALLBACK = 1        # حداقل دلتا برای fallback مبتنی بر total
 MIN_VALID_TOTAL_FOR_FIRST_POLL = 50  # اگر total < 50 باشد، شاید پرینتر جدید است
 MAX_TOTAL_AFTER_RESET = 5000      # اگر مقدار جدید کمتر از این باشد و قبلی بزرگ بود، ریست شده
+
+
+def _elapsed_since_prev(prev: dict) -> float:
+    """مدت‌زمان گذشته از آخرین snapshot ذخیره‌شده را برحسب ثانیه برمی‌گرداند."""
+    updated_at = (prev or {}).get("updated_at")
+    if not updated_at:
+        return float(POLL_INTERVAL)
+    try:
+        elapsed = (datetime.now() - datetime.fromisoformat(updated_at)).total_seconds()
+        return max(1.0, elapsed)
+    except Exception:
+        return float(POLL_INTERVAL)
+
+
+def _dynamic_max_reasonable_delta(prev: dict) -> tuple[int, float]:
+    """حد بالای منطقی دلتا را بر اساس فاصله واقعی بین دو poll محاسبه می‌کند."""
+    elapsed_seconds = max(float(POLL_INTERVAL), _elapsed_since_prev(prev))
+    dynamic_limit = max(100, int(_BASE_MAX_PER_30S * (elapsed_seconds / 30.0)))
+    return dynamic_limit, elapsed_seconds
 
 
 # ─── helpers ────────────────────────────────────────────────────
@@ -51,36 +72,117 @@ def _g(ip: str, oid: str, community: str, timeout: float = 2.5):
     return snmp_get_with_fallback(ip, oid, community, timeout=timeout)
 
 
+def _bootstrap_yield_from_history(ip: str, prev: dict):
+    """اگر yield هنوز پیش‌فرض است، از snapshotهای تاریخی برای تخمین اولیه استفاده کن."""
+    if (prev or {}).get("yield_per_page", DEFAULT_YIELD_PER_PAGE) != DEFAULT_YIELD_PER_PAGE:
+        return None
+    try:
+        from core.database import estimate_yield_from_history
+        result = estimate_yield_from_history(ip, days=7, min_points=3, min_pages=500)
+        if not result:
+            return None
+        estimated_yield = result["yield_per_page"]
+        store._prev.set(ip, {
+            "yield_per_page": estimated_yield,
+            "yield_learning_failures": 0,
+        })
+        log.info(
+            f"  [{ip}] historical yield bootstrap -> {estimated_yield} "
+            f"(pages={result['total_pages']}, toner_drop={result['total_drop']}, samples={result['sample_points']})"
+        )
+        return estimated_yield
+    except Exception as exc:
+        log.exception("Historical yield bootstrap failed for %s: %s", ip, exc)
+        return None
+
+
+
 def _learn_yield_per_page(ip: str, delta_pages: int, prev_toner_level: int, current_toner_level: int, prev: dict):
     """یادگیری خودکار yield_per_page بر اساس مصرف تونر و صفحات چاپ شده."""
+    prev = prev or {}
     if delta_pages <= 0 or prev_toner_level is None or current_toner_level is None:
         return
 
+    current_yield = int(prev.get("yield_per_page", DEFAULT_YIELD_PER_PAGE) or DEFAULT_YIELD_PER_PAGE)
+    if current_yield == DEFAULT_YIELD_PER_PAGE:
+        bootstrapped = _bootstrap_yield_from_history(ip, prev)
+        if bootstrapped:
+            current_yield = bootstrapped
+
     toner_drop = prev_toner_level - current_toner_level
-    if toner_drop <= 0 or toner_drop < 2 or delta_pages < 20:
+    if toner_drop <= 0:
+        return
+    if toner_drop < 1 or delta_pages < 10:
         return
 
     try:
         estimated_yield = int(round(delta_pages * 100.0 / toner_drop))
-    except Exception:
+    except ZeroDivisionError:
+        log.warning("  [%s] yield learning skipped بسبب تقسیم بر صفر", ip)
+        return
+    except Exception as exc:
+        log.exception("  [%s] yield learning error: %s", ip, exc)
         return
 
     if estimated_yield < 300 or estimated_yield > 20000:
+        log.info(f"  [{ip}] yield learning ignored خارج از بازه: {estimated_yield}")
         return
 
-    current_yield = prev.get("yield_per_page", DEFAULT_YIELD_PER_PAGE)
+    diff_ratio = abs(estimated_yield - current_yield) / max(current_yield, 1)
+    failures = int(prev.get("yield_learning_failures", 0) or 0)
+    force_estimate = int(prev.get("force_estimate", 0) or 0)
+
+    if current_yield != DEFAULT_YIELD_PER_PAGE and diff_ratio > 0.30:
+        failures += 1
+        log.info(
+            f"  [{ip}] yield discrepancy detected: current={current_yield}, estimated={estimated_yield}, "
+            f"ratio={diff_ratio:.2f}, failures={failures}/10"
+        )
+        if failures >= 10 and not force_estimate:
+            store._prev.set(ip, {
+                "force_estimate": 1,
+                "yield_learning_failures": failures,
+            })
+            log.info(f"  [{ip}] force_estimate enabled after repeated yield discrepancies")
+        else:
+            store._prev.set(ip, {"yield_learning_failures": failures})
+        return
+
+    failures = 0
     if current_yield != DEFAULT_YIELD_PER_PAGE:
-        diff_ratio = abs(estimated_yield - current_yield) / max(current_yield, 1)
-        if diff_ratio < 0.15:
+        if diff_ratio < 0.05:
             return
-        estimated_yield = int(round((current_yield * 0.5) + (estimated_yield * 0.5)))
+        estimated_yield = int(round((current_yield * 0.6) + (estimated_yield * 0.4)))
 
     if estimated_yield == current_yield:
         return
 
-    log.info(f"  [{ip}] یادگیری خودکار yield_per_page: {current_yield} -> {estimated_yield} "
-             f"(pages={delta_pages}, toner_drop={toner_drop})")
-    store._prev.set(ip, {"yield_per_page": estimated_yield})
+    source = "auto_learn"
+    log.info(
+        f"  [{ip}] yield_per_page updated: {current_yield} -> {estimated_yield} "
+        f"(source={source}, pages={delta_pages}, toner_drop={toner_drop})"
+    )
+    store._prev.set(ip, {
+        "yield_per_page": estimated_yield,
+        "yield_learning_failures": failures,
+    })
+
+
+def get_pages_since_last_reset(prev: dict, total: int):
+    """محاسبه تعداد صفحات چاپ‌شده از زمان آخرین تنظیم مجدد کارتریج."""
+    if not prev or not prev.get("manual_override"):
+        return None
+    override_start_total = prev.get("override_start_total")
+    if override_start_total is None:
+        return None
+    try:
+        pages_since_override = int(total) - int(override_start_total)
+    except Exception:
+        return None
+    if pages_since_override < 0:
+        return None
+    return pages_since_override
+
 
 
 def apply_toner_override(ip: str, total: int, snmp_level: int = None, color: str = None):
@@ -99,12 +201,16 @@ def apply_toner_override(ip: str, total: int, snmp_level: int = None, color: str
     if override_start_total is None or override_start_toner is None:
         return None
 
-    try:
-        pages_since_override = int(total) - int(override_start_total)
-    except Exception:
-        return None
+    pages_since_override = get_pages_since_last_reset(prev, total)
 
-    if pages_since_override <= 0:
+    # 🔥 اصلاح: اگر total کمتر از override_start_total باشد، یعنی دستگاه
+    # ریست شده و override دیگر معتبر نیست → برگرداندن مقدار خام سنسور
+    if pages_since_override is None:
+        log.debug(f"  [{ip}] Toner override invalidated: total({total}) < start({override_start_total}). "
+                  f"Returning raw SNMP level: {snmp_level}")
+        return snmp_level
+
+    if pages_since_override == 0:
         return override_start_toner
 
     if not isinstance(yield_per_page, int) or yield_per_page <= 0:
@@ -115,7 +221,7 @@ def apply_toner_override(ip: str, total: int, snmp_level: int = None, color: str
 
     log.debug(f"  [{ip}] apply_toner_override: override_color={color}, total={total}, "
               f"start_total={override_start_total}, start_toner={override_start_toner}, "
-              f"yield_per_page={yield_per_page}, final={final_level}")
+              f"yield_per_page={yield_per_page}, pages_since_reset={pages_since_override}, final={final_level}")
     return final_level
 
 
@@ -125,7 +231,8 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
                     paper_size: str = None, username: str = None,
                     current_toner_level: int = None, prev_toner_level: int = None,
                     uptime: int = None,
-                    a3_total: int = None, a4_total: int = None):  # ✅ باگ #11: اضافه شده
+                    a3_total: int = None, a4_total: int = None,
+                    poll_timestamp: str = None):  # ✅ باگ #11: اضافه شده
     """
     ثبت رویدادهای هشدار و چاپ با پشتیبانی از رنگ، سایز کاغذ، نام کاربر و تونر.
     
@@ -138,7 +245,17 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
     """
     
     # ─── ثبت رویدادهای هشدار جدید ─────────────────────────────────
-    if curr_codes:
+    suppress_toner_alerts = False
+    if prev and prev.get("manual_override") and prev.get("override_start_toner") is not None:
+        try:
+            current_level_int = int(current_toner_level) if current_toner_level is not None else None
+            override_start = int(prev.get("override_start_toner"))
+            if current_level_int is not None and current_level_int > TONER_ALERT_THRESHOLDS.get("warning", 15) and current_level_int >= override_start - 1:
+                suppress_toner_alerts = True
+        except (TypeError, ValueError):
+            suppress_toner_alerts = False
+
+    if curr_codes and not suppress_toner_alerts:
         # Compare against last_alert_codes persisted in PrevStore to avoid duplicates
         alert_codes_list = prev.get("last_alert_codes", []) if prev else []
         new_codes = [c for c in curr_codes if c not in alert_codes_list]
@@ -150,7 +267,8 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
     prev_total = prev.get("print_total") if prev else None
     prev_uptime = prev.get("uptime") if prev else None
     prev_toner_level = prev_toner_level if prev_toner_level is not None else (prev.get("toner_level") if prev else None)
-    
+    dynamic_max_delta, elapsed_seconds = _dynamic_max_reasonable_delta(prev or {})
+
     delta_pages = (total - prev_total) if (prev_total is not None and total >= prev_total) else 0
     if (current_toner_level is not None and prev_toner_level is not None and prev_total is not None and total >= prev_total):
         delta_toner = current_toner_level - prev_toner_level
@@ -171,6 +289,8 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
                 "alert_codes": curr_codes,
                 "last_alert_codes": curr_codes,
                 "uptime": uptime,
+                "a3_total": a3_total,
+                "a4_total": a4_total,
             })
             return
 
@@ -195,6 +315,8 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
             "alert_codes": curr_codes,
             "last_alert_codes": curr_codes,
             "uptime": uptime,
+            "a3_total": a3_total,
+            "a4_total": a4_total,
         })
         return
 
@@ -212,8 +334,11 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
     # ─── Fallback: اگر شمارنده‌های fc/bw کار نکردند، از دلتای total استفاده کن ───
     if total_delta == 0:
         actual_delta = total - prev_total
-        if MIN_DELTA_FOR_FALLBACK <= actual_delta <= MAX_REASONABLE_DELTA:
-            log.info(f"  [{ip}] fc/bw fallback → total-based delta={actual_delta}")
+        if MIN_DELTA_FOR_FALLBACK <= actual_delta <= dynamic_max_delta:
+            log.info(
+                f"  [{ip}] fc/bw fallback → total-based delta={actual_delta} "
+                f"(dynamic_limit={dynamic_max_delta}, elapsed={elapsed_seconds:.1f}s)"
+            )
             total_delta = actual_delta
             if delta_fc > 0:
                 delta_bw = max(0, actual_delta - delta_fc)
@@ -226,7 +351,7 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
     reason = None
 
     # ✅ باگ #4: تشخیص بهتر کاهش شمارنده + ریبوت
-    # حالت ۱: کاهش شمارنده (هر مقداری)
+    # حالت ۱: کاهش شمارنده (هر مقداری) → نشانه ریست دستگاه
     if total < prev_total:
         skip_print = True
         is_reboot = (uptime is not None and prev_uptime is not None and 
@@ -244,7 +369,9 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
             "is_reboot": is_reboot,
         })
         log.warning(f"  [{ip}] {reason}")
-        # ذخیره مقدار جدید برای جلوگیری از تکرار رویداد
+        # 🔥 اصلاح: پاکسازی مقادیر override هنگام ریست دستگاه
+        # اگر override را پاک نکنیم، چون total جدید < override_start_total است،
+        # محاسبه تونر منفی شده و سطح تونر روی درصد قبلی فریز می‌شود.
         store._prev.set(ip, {
             "print_total": total,
             "toner_level": current_toner_level,
@@ -255,17 +382,29 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
             "uptime": uptime,
             "a3_total": a3_total,
             "a4_total": a4_total,
+            # ✅ ریست کردن override برای جلوگیری از فریز شدن تونر
+            "manual_override": 0,
+            "override_color": None,
+            "override_base_level": None,
+            "override_start_total": None,
+            "override_start_toner": None,
+            "yield_per_page": 2000,
         })
         return
 
     # حالت ۲: دلتا بیش از حد مجاز
-    elif total_delta > MAX_REASONABLE_DELTA:
+    elif total_delta > dynamic_max_delta:
         skip_print = True
-        reason = f"دلتا {total_delta} بیشتر از حد مجاز {MAX_REASONABLE_DELTA}"
+        reason = (
+            f"دلتا {total_delta} بیشتر از حد مجاز پویا {dynamic_max_delta} "
+            f"(elapsed={elapsed_seconds:.1f}s)"
+        )
         add_event(ip, "PRINT_OVERFLOW", {
             "message": f"افزایش غیرمنتظره صفحات: {total_delta} صفحه در یک بازه",
             "severity": "warning",
             "delta": total_delta,
+            "dynamic_limit": dynamic_max_delta,
+            "elapsed_seconds": round(elapsed_seconds, 1),
             "prev_total": prev_total,
             "current_total": total,
         })
@@ -292,6 +431,9 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
         }
         if username:
             event_data["username"] = username
+        if poll_timestamp:
+            # فقط در details JSON ذخیره می‌شود تا در API لاگ‌ها در دسترس باشد.
+            event_data["poll_timestamp"] = poll_timestamp
         
         add_event(ip, "PRINT", event_data)
         log.info(f"  [{ip}] ✓ ثبت چاپ: {total_delta} صفحه ({color})")

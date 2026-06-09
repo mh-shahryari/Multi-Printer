@@ -20,7 +20,7 @@
     "name": "TOSHIBA e-STUDIO2505",
     "community": "public",
     "nickname": "",
-    "device_type": "color",
+    "device_type": "mono",
     "brand": "toshiba"
   },
   {
@@ -68,7 +68,7 @@
     "name": "TOSHIBA e-STUDIO306",
     "community": "public",
     "nickname": "",
-    "device_type": "color",
+    "device_type": "mono",
     "brand": "toshiba"
   },
   {
@@ -76,7 +76,7 @@
     "name": "TOSHIBA e-STUDIO257",
     "community": "public",
     "nickname": "",
-    "device_type": "color",
+    "device_type": "mono",
     "brand": "toshiba"
   },
   {
@@ -92,7 +92,7 @@
     "name": "TOSHIBA e-STUDIO306",
     "community": "public",
     "nickname": "",
-    "device_type": "color",
+    "device_type": "mono",
     "brand": "toshiba"
   },
   {
@@ -116,7 +116,7 @@
     "name": "TOSHIBA e-STUDIO3518",
     "community": "public",
     "nickname": "",
-    "device_type": "color",
+    "device_type": "mono",
     "brand": "toshiba"
   },
   {
@@ -126,13 +126,6 @@
     "nickname": "",
     "device_type": "mono",
     "brand": "canon"
-  },
-  {
-    "ip": "172.16.32.40",
-    "name": "Printer 172.16.32.40",
-    "community": "public",
-    "nickname": "",
-    "device_type": "mono"
   },
   {
     "ip": "172.16.25.58",
@@ -155,7 +148,7 @@
     "name": "TOSHIBA e-STUDIO3015",
     "community": "public",
     "nickname": "",
-    "device_type": "color",
+    "device_type": "mono",
     "brand": "toshiba"
   },
   {
@@ -179,7 +172,7 @@
     "name": "ECS100G-Ver3.05",
     "community": "public",
     "nickname": "",
-    "device_type": "sensor",
+    "device_type": "mono",
     "brand": "sensor"
   },
   {
@@ -187,7 +180,7 @@
     "name": "TOSHIBA e-STUDIO3540",
     "community": "public",
     "nickname": "",
-    "device_type": "color",
+    "device_type": "mono",
     "brand": "toshiba"
   },
   {
@@ -203,7 +196,7 @@
     "name": "TOSHIBA e-STUDIO2050",
     "community": "public",
     "nickname": "",
-    "device_type": "color",
+    "device_type": "mono",
     "brand": "toshiba"
   },
   {
@@ -211,7 +204,14 @@
     "name": "TOSHIBA e-STUDIO257",
     "community": "public",
     "nickname": "",
-    "device_type": "color",
+    "device_type": "mono",
     "brand": "toshiba"
+  },
+  {
+    "ip": "172.16.32.40",
+    "name": "TOSHIBA e-STUDIO2555C",
+    "community": "public",
+    "nickname": "",
+    "device_type": "unknown"
   }
 ]

@@ -4,6 +4,7 @@
 تنظیمات سراسری برنامه
 """
 
+import json
 import os
 
 # ─── فایل‌ها و مسیرها ───────────────────────────────────────────
@@ -13,12 +14,15 @@ OID_PROFILES_FILE    = "oid_profiles.json"
 VALIDATION_LOG_FILE  = "oid_validation_errors.txt"
 
 # ─── پرینترهای پیش‌فرض ─────────────────────────────────────────
-DEFAULT_PRINTERS = [
-    {"ip": "172.16.25.53", "name": "Toshiba #1", "community": "public"},
-    {"ip": "172.16.25.54", "name": "Toshiba #2", "community": "public"},
-    {"ip": "172.16.25.55", "name": "Toshiba #3", "community": "public"},
-    {"ip": "172.16.25.57", "name": "Toshiba #4", "community": "public"},
-]
+# برای جلوگیری از commit شدن IPهای واقعی، لیست پیش‌فرض فقط از ENV خوانده می‌شود.
+# مثال:
+#   export DEFAULT_PRINTERS_JSON='[{"ip":"192.168.1.10","name":"Printer #1","community":"public"}]'
+try:
+    DEFAULT_PRINTERS = json.loads(os.getenv("DEFAULT_PRINTERS_JSON", "[]") or "[]")
+    if not isinstance(DEFAULT_PRINTERS, list):
+        DEFAULT_PRINTERS = []
+except Exception:
+    DEFAULT_PRINTERS = []
 
 # ─── SNMP ───────────────────────────────────────────────────────
 SNMP_PORT     = 161
@@ -86,11 +90,19 @@ if "*" in CORS_ALLOWED_ORIGINS and ENVIRONMENT == "production":
     )
 
 # ─── دفاتر و subnetهای مجاز ─────────────────────────────────────
-OFFICE_SUBNETS = {
+# اگر ENV تنظیم نشده باشد، fallback به subnetهای legacy انجام می‌شود تا
+# محدودسازی دسترسی کاربران و فیلتر دفاتر از کار نیفتد.
+_LEGACY_OFFICE_SUBNETS = {
     "imamat": "172.16.25",
     "soroush": "172.16.24",
     "falestin": "172.16.0",
     "elahiye": "172.16.32",
+}
+OFFICE_SUBNETS = {
+    "imamat": os.getenv("OFFICE_SUBNET_IMAMAT") or _LEGACY_OFFICE_SUBNETS["imamat"],
+    "soroush": os.getenv("OFFICE_SUBNET_SOROUSH") or _LEGACY_OFFICE_SUBNETS["soroush"],
+    "falestin": os.getenv("OFFICE_SUBNET_FALESTIN") or _LEGACY_OFFICE_SUBNETS["falestin"],
+    "elahiye": os.getenv("OFFICE_SUBNET_ELAHIYE") or _LEGACY_OFFICE_SUBNETS["elahiye"],
     "other": None,
 }
 

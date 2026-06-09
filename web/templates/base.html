@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{% block title %}Multi Printer Monitoring{% endblock %}</title>
-    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
-    <script src="{{ url_for('static', filename='js/chart.umd.min.js') }}"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico', v=config.get('ASSET_VERSION', '20260609-2')) }}" type="image/x-icon">
+    <script src="{{ url_for('static', filename='js/chart.umd.min.js', v=config.get('ASSET_VERSION', '20260609-2')) }}"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v=config.get('ASSET_VERSION', '20260609-2')) }}">
 
     {% block head %}{% endblock %}
 </head>
@@ -42,9 +42,9 @@
     {% block global_scripts %}{% endblock %}
     {% if load_dashboard_scripts | default(true) %}
     <!-- بارگذاری Sortable قبل از dashboard.js -->
-    <script src="{{ url_for('static', filename='js/Sortable.min.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/legacy-mode.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/Sortable.min.js', v=config.get('ASSET_VERSION', '20260609-2')) }}"></script>
+    <script src="{{ url_for('static', filename='js/dashboard.js', v=config.get('ASSET_VERSION', '20260609-2')) }}"></script>
+    <script src="{{ url_for('static', filename='js/legacy-mode.js', v=config.get('ASSET_VERSION', '20260609-2')) }}"></script>
     {% endif %}
     {% block scripts %}{% endblock %}
 </body>

@@ -12,6 +12,7 @@ from core.snmp.protocol import snmp_get_bulk, snmp_get_with_fallback
 from core.snmp.oid_map import OIDS, PAPER_SIZE_MAP, TONER_STATUS, TONER_LEVEL
 from core.collectors.base import si, ss, _counters_event, validate_counter_consistency
 from core import store
+from core.database import add_event
 
 log = logging.getLogger("PrinterMonitor")
 
@@ -355,17 +356,11 @@ def collect_toshiba(ip: str, name: str, community: str, start: float) -> dict:
     printer = printer_fc + printer_bw
     fax = si(raw.get("print_fax"))
 
-    # تصحیح duplex
-    _DUPLEX_TOLERANCE_PCT = 0.5
-    _DUPLEX_TOLERANCE_ABS = 1000
+    # نکته مهم: OID `twin` در بعضی مدل‌های Toshiba با تأخیر/دو مرحله update می‌شود.
+    # اگر total را با twin دوباره اصلاح کنیم، ممکن است یک job دوبار در log ثبت شود.
+    # بنابراین total خام دستگاه را منبع truth نگه می‌داریم و twin فقط برای نمایش نگه داشته می‌شود.
     twin_pages = twin * 2 if twin > 0 else 0
-    if twin > 0:
-        total_corrected = color + bw + twin_pages
-        if abs(total_corrected - total) <= max(total * _DUPLEX_TOLERANCE_PCT, _DUPLEX_TOLERANCE_ABS):
-            log.info(f"Toshiba {ip} duplex correction: raw_total={total}, corrected={total_corrected}")
-            total = total_corrected
-        else:
-            log.warning(f"Toshiba {ip} duplex correction skipped: diff too large")
+    bw_for_event = max(0, total - color) if total >= 0 and color >= 0 else bw
 
     a3_total = si(raw.get("a3_total"))
     a4_total = si(raw.get("a4_total"))
@@ -400,9 +395,10 @@ def collect_toshiba(ip: str, name: str, community: str, start: float) -> dict:
     prev_toner = prev.get("toner_level")
     # ✅ باگ #11: پاس دادن a3_total و a4_total به _counters_event
     _counters_event(ip, total, prev, alerts, curr_codes,
-                    full_color=color, black_white=bw, paper_size=paper_size,
+                    full_color=color, black_white=bw_for_event, paper_size=paper_size,
                     current_toner_level=black_level, prev_toner_level=prev_toner,
-                    uptime=ut, a3_total=a3_total, a4_total=a4_total)
+                    uptime=ut, a3_total=a3_total, a4_total=a4_total,
+                    poll_timestamp=datetime.fromtimestamp(start).isoformat())
 
     c_warns = validate_counter_consistency(
         {"total": total, "full_color": color, "black_white": bw,

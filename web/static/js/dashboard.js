@@ -132,6 +132,7 @@ const _groupOpen = {};
 let sortableInstance = null;
 let currentPrinters = [];
 const STORAGE_KEY = 'printer_order';
+const EXTRA_COUNTERS_ACCORDION_KEY = 'printer_extra_counters_open';
 let swapPluginMounted = false;
 
 function getDefaultPrinterOrder(printers) {
@@ -290,10 +291,16 @@ function renderPrinterCard(p) {
   const bw = c.black_white || 0;
   const toners = p.toners || {};
 
-  const cyanLevel = toners.cyan?.level || 0;
-  const magentaLevel = toners.magenta?.level || 0;
-  const yellowLevel = toners.yellow?.level || 0;
-  const blackLevel = toners.black?.level || 0;
+  const cyanLevel = toners.cyan?.level;
+  const magentaLevel = toners.magenta?.level;
+  const yellowLevel = toners.yellow?.level;
+  const blackLevel = toners.black?.level;
+
+  // ✅ باگ #7: تشخیص صحیح وضعیت undefined برای نوارهای تونر
+  const cyanHasData = cyanLevel !== null && cyanLevel !== undefined;
+  const magentaHasData = magentaLevel !== null && magentaLevel !== undefined;
+  const yellowHasData = yellowLevel !== null && yellowLevel !== undefined;
+  const blackHasData = blackLevel !== null && blackLevel !== undefined;
 
   const cls = online === true ? 'oc-online' : (online === false ? 'oc-offline' : '');
   const warnCls = (p.alerts?.length) ? 'oc-warn' : cls;
@@ -319,23 +326,25 @@ function renderPrinterCard(p) {
   }
   if (!officeName) officeName = 'سایر';
 
+  // ✅ باگ #7: نمایش صحیح تونرهای نامشخص (جلوگیری از نمایش 0% وقتی مقدار null است)
+  // ✅ باگ #7: نمایش صحیح تونرهای نامشخص (جلوگیری از نمایش 0% وقتی مقدار null است)
   const colorTonersHtml = `
     <div class="oc-toner-group">
       <div class="oc-toner-item">
-        <div class="oc-toner-bar" style="width: ${cyanLevel}%; background: #00d4ff;"></div>
+        <div class="oc-toner-bar" style="width: ${cyanHasData ? cyanLevel : 0}%; background: ${cyanHasData ? '#00d4ff' : '#555'};"></div>
       </div>
       <div class="oc-toner-item">
-        <div class="oc-toner-bar" style="width: ${magentaLevel}%; background: #ea80fc;"></div>
+        <div class="oc-toner-bar" style="width: ${magentaHasData ? magentaLevel : 0}%; background: ${magentaHasData ? '#ea80fc' : '#555'};"></div>
       </div>
       <div class="oc-toner-item">
-        <div class="oc-toner-bar" style="width: ${yellowLevel}%; background: #ffd740;"></div>
+        <div class="oc-toner-bar" style="width: ${yellowHasData ? yellowLevel : 0}%; background: ${yellowHasData ? '#ffd740' : '#555'};"></div>
       </div>
     </div>
   `;
 
   const blackTonerHtml = `
     <div class="oc-toner-item">
-      <div class="oc-toner-bar" style="width: ${blackLevel}%; background: #9e9e9e;"></div>
+      <div class="oc-toner-bar" style="width: ${blackHasData ? blackLevel : 0}%; background: ${blackHasData ? '#9e9e9e' : '#555'};"></div>
     </div>
   `;
 
@@ -447,8 +456,9 @@ async function submitTonerReset() {
   new_level = Math.max(0, Math.min(100, new_level));
   if (!_tonerResetTargetIp) { toast('هدف نامشخص است','e'); return; }
   try {
-    const r = await fetch(`${API}/api/printer/${encodeURIComponent(_tonerResetTargetIp)}/toner_reset`, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+    const r = await apiFetch(`${API}/api/printer/${encodeURIComponent(_tonerResetTargetIp)}/toner_reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ color, new_level })
     });
     const j = await r.json();
@@ -457,7 +467,11 @@ async function submitTonerReset() {
       closeTonerResetModal();
       fetchData();
     } else {
-      toast(j.error || 'خطا در به‌روزرسانی', 'e');
+      if (j.error === 'csrf_token_invalid') {
+        toast('نشست شما منقضی شده است. صفحه را تازه کنید و دوباره تلاش کنید.', 'e');
+      } else {
+        toast(j.error || 'خطا در به‌روزرسانی', 'e');
+      }
     }
   } catch(e) {
     console.error(e);
@@ -580,6 +594,49 @@ function toggleSbGroup(id) {
   if (el) el.classList.toggle('open', _groupOpen[id]);
 }
 
+function destroyPrinterDailyChart(ip) {
+  const existing = printerChartInstances[ip];
+  if (!existing) return;
+  try {
+    if (typeof existing.destroy === 'function') {
+      existing.destroy();
+    }
+  } catch (e) {
+    console.error('Printer chart destroy error:', e);
+  }
+  delete printerChartInstances[ip];
+}
+
+function schedulePrinterDailyChartLoad(ip, delay = 50, force = false) {
+  if (!ip || ip === 'overview') return;
+  const panel = document.getElementById('panel-' + ip.replace(/\./g, '-'));
+  if (!panel || !panel.classList.contains('active')) return;
+  const chartCanvas = panel.querySelector('.printer-daily-chart-canvas');
+  if (!chartCanvas) return;
+  if (!force && (chartCanvas.dataset.dailyChartLoaded || chartCanvas.dataset.dailyChartLoading)) return;
+
+  chartCanvas.dataset.dailyChartLoading = '1';
+  delete chartCanvas.dataset.dailyChartLoaded;
+
+  setTimeout(() => {
+    loadPrinterDailyChart(ip)
+      .then(() => {
+        const currentCanvas = document.getElementById(`printer-daily-chart-${ip.replace(/\./g, '-')}`);
+        if (currentCanvas) {
+          currentCanvas.dataset.dailyChartLoaded = '1';
+          delete currentCanvas.dataset.dailyChartLoading;
+        }
+      })
+      .catch(err => {
+        const currentCanvas = document.getElementById(`printer-daily-chart-${ip.replace(/\./g, '-')}`);
+        if (currentCanvas) {
+          delete currentCanvas.dataset.dailyChartLoading;
+        }
+        console.error('Printer chart load failed:', err);
+      });
+  }, delay);
+}
+
 function switchTab(id, el) {
   activeTab = id;
   document.querySelectorAll('.sb-item, .sb-overview').forEach(t => t.classList.remove('active'));
@@ -601,21 +658,7 @@ function switchTab(id, el) {
   const panel = document.getElementById('panel-' + id.replace(/\./g, '-'));
   if (panel) {
     panel.classList.add('active');
-    const chartCanvas = panel.querySelector('.printer-daily-chart-canvas');
-    if (chartCanvas && !chartCanvas.dataset.dailyChartLoaded && !chartCanvas.dataset.dailyChartLoading) {
-      chartCanvas.dataset.dailyChartLoading = '1';
-      setTimeout(() => {
-        loadPrinterDailyChart(id)
-          .then(() => {
-            chartCanvas.dataset.dailyChartLoaded = '1';
-            delete chartCanvas.dataset.dailyChartLoading;
-          })
-          .catch(err => {
-            delete chartCanvas.dataset.dailyChartLoading;
-            console.error('Printer chart load failed:', err);
-          });
-      }, 50);
-    }
+    schedulePrinterDailyChartLoad(id);
   }
 }
 
@@ -691,6 +734,9 @@ function renderAllPrinterPanels(printers) {
       panel.className = 'tab-panel';
       document.querySelector('.main').appendChild(panel);
     }
+
+    const wasActive = panel.classList.contains('active') || activeTab === p.ip;
+    destroyPrinterDailyChart(p.ip);
     
     // تشخیص نوع دستگاه
     if (p.device_type === 'sensor') {
@@ -702,6 +748,10 @@ function renderAllPrinterPanels(printers) {
     const logId = 'plog-' + p.ip.replace(/\./g,'-');
     const printerEvents = allEvents.filter(e => e.printer_ip === p.ip);
     renderLogTable(printerEvents, logId, logId+'-count');
+
+    if (wasActive && p.device_type !== 'sensor') {
+      schedulePrinterDailyChartLoad(p.ip, 80, true);
+    }
   });
 }
 
@@ -725,6 +775,7 @@ function buildPrinterDetail(p) {
   const fcPct = total > 0 ? Math.round((fc / total) * 100) : 0;
   const bwPct = total > 0 ? Math.round((bw / total) * 100) : 0;
   const scan  = (c.scan_fc||0)+(c.scan_bw||0)+(c.scan_net_fc||0)+(c.scan_net_bw||0);
+  const hasPagesSinceReset = typeof c.pages_since_last_reset === 'number' && Number.isFinite(c.pages_since_last_reset);
 
   const maxP = Math.max(...Object.values(pz).map(v=>v.total||0), 1);
   const PCOLS = {A4:{cls:'pb-a4',clr:'#00d4ff'},A3:{cls:'pb-a3',clr:'#ff7043'},A4R:{cls:'pb-a4r',clr:'#ffd740'},A5:{cls:'pb-a5',clr:'#00e676'},B4:{cls:'pb-b4',clr:'#ea80fc'}};
@@ -742,85 +793,74 @@ function buildPrinterDetail(p) {
     </div>`;
   }).join('');
 
-  // ═══ بخش جدید: کارتریج‌ها ─────────────────────────────────
-  const cartridgeRows = ['black','cyan','magenta','yellow']
-    .map(col => {
-      const td = toners[col] || {};
-      if (!td.name && !td.level) return ''; // نمایش نده اگر داده‌ای نیست
-      const name = td.name || {black:'تونر سیاه',cyan:'تونر فیروزه‌ای',magenta:'تونر قرمز',yellow:'تونر زرد'}[col];
-      const capacity = td.max ? `${fmtN(td.max)} صفحه` : 'نامشخص';
-      const remaining = td.level !== undefined && td.level !== null ? `${td.level}%` : 'نامشخص';
-      const status = td.status || 'unknown';
-      const statusMap = {ok:'سالم', low:'کم', critical:'بحرانی', empty:'خالی', unknown:'نامشخص'};
-      const statusText = statusMap[status] || status;
-      const statusColor = {ok:'var(--green)', low:'var(--yellow)', critical:'var(--red)', empty:'var(--red)'}[status] || 'var(--text3)';
-      
-      const dotColor = {black:'#9e9e9e', cyan:'#00d4ff', magenta:'#ea80fc', yellow:'#ffd740'}[col] || '#9e9e9e';
-      
-      return `<div class="cartridge-card">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <div class="cartridge-dot" style="background:${dotColor};width:12px;height:12px;border-radius:50%;box-shadow:0 0 6px ${dotColor}40"></div>
-          <span style="font-weight:600;color:var(--text)">${escapeHtml(name)}</span>
-        </div>
-        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2);margin-bottom:6px">
-          <span>ظرفیت: <strong>${capacity}</strong></span>
-          <span>باقی: <strong style="color:${statusColor}">${remaining}</strong></span>
-        </div>
-        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text3)">
-          <span>وضعیت: <strong style="color:${statusColor};text-transform:capitalize">${statusText}</strong></span>
-        </div>
-      </div>`;
-    }).filter(row => row !== '').join('');
-
   const TCOLORS = {cyan:'#00d4ff',magenta:'#ea80fc',yellow:'#ffd740',black:'#9e9e9e'};
   const TGRADS  = {cyan:'#00d4ff,#0097a7',magenta:'#ea80fc,#ab47bc',yellow:'#ffd740,#f9a825',black:'#bdbdbd,#757575'};
-  
-  // ═══ تغییر: فقط تونرهایی که level > 0 دارند یا device_type == 'color' است ═══
-  const isColorPrinter = (p.device_type === 'color');
-  const tonerCards = ['cyan','magenta','yellow','black']
+
+  const preferredSupplyOrder = ['black','cyan','magenta','yellow','drum'];
+  const orderedSupplyKeys = [
+    ...preferredSupplyOrder.filter(key => Object.prototype.hasOwnProperty.call(toners, key)),
+    ...Object.keys(toners).filter(key => !preferredSupplyOrder.includes(key))
+  ];
+  const supplyCards = orderedSupplyKeys
     .filter(col => {
-      // تونر مشکی همیشه نمایش داده شود
-      if (col === 'black') return true;
-      // تونرهای رنگی فقط اگر پرینتر رنگی باشد
-      if (!isColorPrinter) return false;
-      // یا اگر level > 0 باشد
       const td = toners[col] || {};
-      return (td.level || 0) > 0;
+      return Boolean(td.name || td.level !== undefined && td.level !== null || td.remaining || td.max || td.usage || td.usage_m);
     })
     .map(col => {
       const td = toners[col] || {};
-      const hasLevel = td.level !== undefined && td.level !== null;
-      const lvl = hasLevel ? td.level : 0;
-      const consumptionPct = hasLevel ? Math.min(100, Math.max(0, 100 - lvl)) : 0;
-      const clr = TCOLORS[col];
-      const sc = td.status || '?';
-      const scCls = {ok:'ts-ok',low:'ts-low',critical:'ts-critical',empty:'ts-empty'}[sc] || 'ts-ok';
-      const pctClr = lvl > 50 ? 'var(--green)' : lvl > 20 ? 'var(--yellow)' : 'var(--red)';
-      const dots = td.usage || 0;
-      const dotM = td.usage_m || 0;
-      const dotsBar = total > 0 ? Math.min(100, Math.round(dots / Math.max(...Object.values(toners).map(t2 => t2.usage || 1)) * 100)) : 0;
-      return `<div class="toner-card">
-        <div class="toner-head">
-          <div class="toner-name"><div class="toner-dot" style="background:${clr};box-shadow:0 0 6px ${clr}40"></div>${ {cyan:'Cyan',magenta:'Magenta',yellow:'Yellow',black:'Black'}[col] }</div>
-          <span class="toner-status-badge ${scCls}">${sc.toUpperCase()}</span>
-        </div>
-        <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:6px">
-          <span class="toner-pct-big num" style="color:${pctClr}">${lvl}%</span>
-        </div>
-        <div class="toner-bar-bg"><div class="toner-bar-fill" style="width:${lvl}%;background:linear-gradient(90deg,${TGRADS[col]})"></div></div>
-        <div class="divider" style="margin:8px 0"></div>
-        <div class="section-title" style="font-size:9px;margin-bottom:6px">📊 آمار مصرف</div>
-        <div class="toner-stats">
-          <div class="toner-stat"><span class="toner-stat-lbl">Dot Count</span><span class="toner-stat-val num">${fmtN(dots)}</span></div>
-          <div class="toner-stat"><span class="toner-stat-lbl">Mega Dots</span><span class="toner-stat-val num">${dotM}M</span></div>
-        </div>
-        ${hasLevel ? `
-        <div style="margin-top:8px">
-          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-bottom:3px">تخمین مصرف</div>
-          <div class="toner-bar-bg"><div class="toner-bar-fill" style="width:${consumptionPct}%;background:${clr}40;border:1px solid ${clr}60"></div></div>
-        </div>
-        ` : ''}
-      </div>`;
+      const name = td.name || {black:'تونر سیاه',cyan:'تونر فیروزه‌ای',magenta:'تونر ارغوانی',yellow:'تونر زرد',drum:'درام'}[col];
+      const hasLevel = typeof td.level === 'number' && Number.isFinite(td.level);
+      const level = hasLevel ? Math.max(0, Math.min(100, td.level)) : null;
+      const status = td.status || 'unknown';
+      const statusMap = {ok:'سالم', low:'کم', critical:'بحرانی', empty:'خالی', unknown:'نامشخص', not_supported:'پشتیبانی‌نشده', no_sensor:'بدون سنسور'};
+      const statusText = statusMap[status] || status;
+      const statusColor = {ok:'var(--green)', low:'var(--yellow)', critical:'var(--red)', empty:'var(--red)', not_supported:'var(--text3)', no_sensor:'var(--text2)'}[status] || 'var(--text3)';
+      const dotColor = col === 'drum' ? '#ffb74d' : (TCOLORS[col] || '#9e9e9e');
+      const progressGradient = col === 'drum' ? '#ffb74d,#fb8c00' : (TGRADS[col] || '#9e9e9e,#757575');
+      const usageValue = (typeof td.usage === 'number' && td.usage > 0) ? td.usage : null;
+      const usageMega = (typeof td.usage_m === 'number' && td.usage_m > 0)
+        ? td.usage_m
+        : (usageValue ? Number((usageValue / 1000000).toFixed(2)) : null);
+      const capacityText = (typeof td.max === 'number' && td.max > 100)
+        ? `${fmtN(td.max)} صفحه`
+        : '—';
+      const remainingText = hasLevel
+        ? `${level}%`
+        : (typeof td.remaining === 'number' && td.remaining >= 0 ? fmtN(td.remaining) : '—');
+      const unsupportedHint = (status === 'not_supported' || status === 'no_sensor')
+        ? `<div class="supply-card-hint">این دستگاه سطح این مصرفی را از طریق SNMP گزارش نمی‌کند.</div>`
+        : '';
+
+      return `
+        <article class="supply-card">
+          <div class="supply-card-head">
+            <div class="supply-card-title">
+              <span class="supply-card-dot" style="background:${dotColor};box-shadow:0 0 6px ${dotColor}40"></span>
+              <div>
+                <div class="supply-card-name">${escapeHtml(name)}</div>
+                <div class="supply-card-capacity">ظرفیت: ${escapeHtml(capacityText)}</div>
+              </div>
+            </div>
+            <span class="toner-status-badge ${ {ok:'ts-ok',low:'ts-low',critical:'ts-critical',empty:'ts-empty'}[status] || 'ts-ok' }">${escapeHtml(statusText)}</span>
+          </div>
+
+          <div class="supply-card-meta">
+            <span>باقی‌مانده: <strong style="color:${statusColor}">${escapeHtml(remainingText)}</strong></span>
+            ${hasLevel ? `<span class="supply-card-level num">${level}%</span>` : ''}
+          </div>
+
+          <div class="supply-card-progress">
+            <div class="supply-card-progress-fill${hasLevel ? '' : ' is-empty'}" style="width:${hasLevel ? level : 0}%;background:${hasLevel ? `linear-gradient(90deg,${progressGradient})` : 'linear-gradient(90deg, rgba(123,134,160,.2), rgba(123,134,160,.08))'}"></div>
+          </div>
+
+          ${usageValue || usageMega ? `
+            <div class="supply-card-stats">
+              ${usageValue ? `<div class="supply-stat"><span class="supply-stat-lbl">Dot Count</span><span class="supply-stat-val num">${fmtN(usageValue)}</span></div>` : ''}
+              ${usageMega ? `<div class="supply-stat"><span class="supply-stat-lbl">Mega Dots</span><span class="supply-stat-val num">${usageMega}M</span></div>` : ''}
+            </div>
+          ` : ''}
+          ${unsupportedHint}
+        </article>`;
     }).join('');
 
   const alertsHtml = alerts.length ? `<div class="section" style="margin-top:14px">
@@ -846,8 +886,9 @@ function buildPrinterDetail(p) {
           ${nicknameButtonHtml}
        </div>`;
 
+  // ✅ باگ #6: حذف دکمه حذف تکراری — فقط printerDeleteButtonHtml استفاده می‌شود
   const printerDeleteButtonHtml = canEditPrinters()
-    ? `<button class="btn btn-orange" onclick="removePrinter('${p.ip}','${p.name}')" style="font-size:10px">× حذف</button>`
+    ? `<button class="btn btn-sm btn-orange" onclick="removePrinter('${p.ip}','${escapeHtml(p.name)}')" style="font-size:9px">× حذف</button>`
     : '';
 
   const printerLogActionsHtml = canAdmin()
@@ -883,10 +924,19 @@ function buildPrinterDetail(p) {
         <span class="stats-badge">${new Date().toLocaleDateString('fa-IR')}</span>
       </div>
       <div class="stats-body">
-        <div class="stat-total">
-          <div class="stat-total-label">کل چاپ</div>
-          <div class="stat-total-value">${fmtN(total)}</div>
-          <div class="stat-total-divider"></div>
+        <div class="stat-summary-grid${hasPagesSinceReset ? ' has-reset' : ''}">
+          <div class="stat-total compact">
+            <div class="stat-total-label">کل چاپ</div>
+            <div class="stat-total-value">${fmtN(total)}</div>
+            <div class="stat-total-divider"></div>
+          </div>
+          ${hasPagesSinceReset ? `
+            <div class="stat-total compact stat-reset-total">
+              <div class="stat-total-label">چاپ از آخرین شارژ</div>
+              <div class="stat-total-value">${fmtN(c.pages_since_last_reset)}</div>
+              <div class="stat-total-divider"></div>
+            </div>
+          ` : ''}
         </div>
         ${isColorDeviceType ? `
         <div class="stat-row">
@@ -918,38 +968,52 @@ function buildPrinterDetail(p) {
   `;
 
   // بخش شمارنده‌های اضافی (پرینتر، کپی، فکس، اسکن) به صورت دو ستونی
-  const extraCountersHtml = `
-    <div class="detail-grid" style="margin-top:10px">
-      <div style="display:flex;flex-direction:column;gap:6px">
-        ${[['Printer',c.printer,'var(--text2)'],['Copy',c.copy ?? total,'var(--magenta)'],['Fax',c.fax,'var(--blue)'],['List',c.list ?? total,'var(--text3)']]
-          .filter(([l,v,clr])=>{
-            // Printer: همیشه نمایش داده شود
-            if(l==='Printer') return true;
-            // Copy: فقط اگر مقدار واقعی و متفاوت از total باشد
-            if(l==='Copy') return (c.copy!==null && c.copy!==undefined && c.copy!==total);
-            // List: فقط اگر مقدار واقعی و متفاوت از total باشد
-            if(l==='List') return (c.list!==null && c.list!==undefined && c.list!==total);
-            // Fax: فقط اگر مقدار واقعی (نه null/undefined نه 0) باشد
-            if(l==='Fax') return (c.fax!==null && c.fax!==undefined && c.fax!==0);
-            return false;
-          })
-          .map(([l,v,clr])=>`
-          <div style="display:flex;justify-content:space-between;padding:5px 10px;background:var(--bg4);border-radius:5px;border:1px solid var(--border)">
-            <span style="font-family:var(--mono);font-size:10px;color:var(--text3)">${l}</span>
-            <span style="font-family:var(--mono);font-size:11px;font-weight:700;color:${clr}">${fmtN(v)}</span>
-          </div>`).join('')}
-      </div>
-      <div style="display:flex;flex-direction:column;gap:6px">
-        ${[['Scan FC',c.scan_fc,'var(--cyan)'],['Scan BW',c.scan_bw,'var(--text2)'],['Net Scan FC',c.scan_net_fc,'var(--cyan)'],['Net Scan BW',c.scan_net_bw,'var(--text2)']]
-          .filter(([l,v,clr])=>v!==null && v!==undefined)
-          .map(([l,v,clr])=>`
-          <div style="display:flex;justify-content:space-between;padding:5px 10px;background:var(--bg4);border-radius:5px;border:1px solid var(--border)">
-            <span style="font-family:var(--mono);font-size:10px;color:var(--text3)">${l}</span>
-            <span style="font-family:var(--mono);font-size:11px;font-weight:700;color:${clr}">${fmtN(v)}</span>
-          </div>`).join('')}
+  // فقط ردیف‌هایی نمایش داده می‌شوند که مقدار عددی معتبر دارند.
+  const extraCounterPrimaryRows = [
+    ['Printer', (c.printer ?? total), 'var(--text2)'],
+    ['Copy', c.copy, 'var(--magenta)'],
+    ['Fax', c.fax, 'var(--blue)'],
+    ['List', c.list, 'var(--text3)']
+  ].filter(([, value]) => hasNumericCounterValue(value));
+
+  const extraCounterSecondaryRows = [
+    ['Scan FC', c.scan_fc, 'var(--cyan)'],
+    ['Scan BW', c.scan_bw, 'var(--text2)'],
+    ['Net Scan FC', c.scan_net_fc, 'var(--cyan)'],
+    ['Net Scan BW', c.scan_net_bw, 'var(--text2)']
+  ].filter(([, value]) => hasNumericCounterValue(value));
+
+  const hasAnyExtraCounter = extraCounterPrimaryRows.length || extraCounterSecondaryRows.length;
+  const accordionOpen = getExtraCountersAccordionState(ip);
+  const safeIp = ip.replace(/\./g, '-');
+
+  const renderExtraCounterRow = ([label, value, color]) => `
+    <div class="counter-help-row" style="display:flex;justify-content:space-between;padding:5px 10px;background:var(--bg4);border-radius:5px;border:1px solid var(--border)">
+      <span class="counter-help-title-wrap">${renderExtraCounterLabel(label)}</span>
+      <span style="font-family:var(--mono);font-size:11px;font-weight:700;color:${color}">${fmtN(value)}</span>
+    </div>`;
+
+  const extraCounterPrimaryHtml = extraCounterPrimaryRows.length
+    ? `<div style="display:flex;flex-direction:column;gap:6px">${extraCounterPrimaryRows.map(renderExtraCounterRow).join('')}</div>`
+    : '';
+  const extraCounterSecondaryHtml = extraCounterSecondaryRows.length
+    ? `<div style="display:flex;flex-direction:column;gap:6px">${extraCounterSecondaryRows.map(renderExtraCounterRow).join('')}</div>`
+    : '';
+
+  const extraCountersHtml = hasAnyExtraCounter ? `
+    <div class="section extra-counters-accordion" style="margin-top:10px">
+      <button type="button" id="extra-counters-header-${safeIp}" class="extra-counters-accordion-header${accordionOpen ? ' open' : ''}" onclick="toggleExtraCountersAccordion('${ip}')">
+        <span class="extra-counters-accordion-title">📊 سایر شمارنده‌ها</span>
+        <span class="extra-counters-accordion-icon">⌄</span>
+      </button>
+      <div id="extra-counters-body-${safeIp}" class="extra-counters-accordion-body${accordionOpen ? ' open' : ''}">
+        <div class="detail-grid${(extraCounterPrimaryRows.length === 0 || extraCounterSecondaryRows.length === 0) ? ' col1' : ''}" style="margin-top:10px">
+          ${extraCounterPrimaryHtml}
+          ${extraCounterSecondaryHtml}
+        </div>
       </div>
     </div>
-  `;
+  ` : `<div class="section" style="margin-top:10px"><div class="section-title">📊 سایر شمارنده‌ها</div><div class="log-empty">اطلاعاتی موجود نیست</div></div>`;
 
   return `
     <div class="section" style="margin-bottom:14px">
@@ -961,7 +1025,7 @@ function buildPrinterDetail(p) {
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           <div style="text-align:center"><div style="font-family:var(--mono);font-size:9px;color:var(--text3)">Response</div><div style="font-family:var(--mono);font-size:13px;color:var(--cyan)">${p.poll_ms}ms</div></div>
-          <button class="btn btn-orange" onclick="removePrinter('${p.ip}','${p.name}')" style="font-size:10px">× حذف</button>
+          ${printerDeleteButtonHtml}
         </div>
       </div>
     </div>
@@ -974,22 +1038,17 @@ function buildPrinterDetail(p) {
 
     <div class="detail-grid" style="margin-bottom:14px">
       <div class="section">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <div class="section-title">📦 کارتریج‌ها</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <div class="section-title">📦 تونر و کارتریج‌ها</div>
           ${canManage() ? `<button class="btn btn-cyan" onclick="openTonerResetModal('${ip}')" style="font-size:12px">تنظیم مجدد کارتریج</button>` : ''}
         </div>
-        <div class="cartridge-rows">${cartridgeRows||'<span style="color:var(--text3);font-size:11px">اطلاعات موجود نیست</span>'}</div>
+        <div class="supply-grid">${supplyCards || '<span style="color:var(--text3);font-size:11px">اطلاعات موجود نیست</span>'}</div>
       </div>
       <div class="section"><div class="section-title">📈 نمودار مصرف روزانه (۳۰ روز اخیر)</div>
         <div style="position:relative;height:280px;">
           <canvas id="printer-daily-chart-${ip.replace(/\./g,'-')}" class="printer-daily-chart-canvas" style="width:100%;height:100%;"></canvas>
         </div>
       </div>
-    </div>
-
-    <div class="section" style="margin-bottom:14px">
-      <div class="section-title">🎨 تونر — سطح و آمار مصرف</div>
-      <div class="toner-grid">${tonerCards}</div>
     </div>
 
     ${alertsHtml}
@@ -1489,7 +1548,7 @@ async function doAddPrinter() {
   const community = document.getElementById('add-community-single').value.trim() || 'public';
   if (!ip) { toast('IP الزامی است','e'); return; }
   try {
-    const r = await fetch(`${API}/api/printers/add`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip, name, community})});
+    const r = await apiFetch(`${API}/api/printers/add`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip, name, community})});
     const j = await r.json();
     if (!r.ok) { toast(j.error||'خطا','e'); return; }
     toast(`پرینتر ${ip} اضافه شد`,'s');
@@ -1558,7 +1617,7 @@ async function doBulkAdd() {
   btn.disabled = true; btn.textContent = '⏳ در حال افزودن...';
 
   try {
-    const r = await fetch(`${API}/api/printers/bulk-add`, {
+    const r = await apiFetch(`${API}/api/printers/bulk-add`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -1590,7 +1649,7 @@ async function removePrinter(ip, name) {
   if (!canAdmin()) { toast('دسترسی ندارید', 'e'); return; }
   if (!confirm(`پرینتر ${name} (${ip}) حذف شود؟`)) return;
   try {
-    const r = await fetch(`${API}/api/printers/remove`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip})});
+    const r = await apiFetch(`${API}/api/printers/remove`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip})});
     if (r.ok) {
       toast(`پرینتر ${ip} حذف شد`,'w');
       const panel = document.getElementById('panel-' + ip.replace(/\./g,'-'));
@@ -1643,7 +1702,7 @@ async function doDiscover() {
   dr.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text3);font-family:var(--mono)">🔍 در حال جستجو در ${ranges.length} رنج...</div>`;
 
   try {
-    const r = await fetch(`${API}/api/printers/discover`, {
+    const r = await apiFetch(`${API}/api/printers/discover`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ranges, community })
@@ -1663,14 +1722,14 @@ async function doDiscover() {
       return `
       <div class="discover-item${isExist ? ' discover-existing' : ''}">
         <div>
-          <div class="discover-ip">${f.ip}
+          <div class="discover-ip">${escapeHtml(f.ip)}
             ${isExist ? '<span class="discover-badge">موجود</span>' : ''}
           </div>
-          <div class="discover-model">${f.model}</div>
+          <div class="discover-model">${escapeHtml(f.model || '')}</div>
         </div>
         ${isExist
           ? '<span style="font-size:10px;color:var(--text3);font-family:var(--mono)">قبلاً اضافه شده</span>'
-          : `<button class="btn btn-green" onclick="quickAdd(event, '${f.ip}','${(f.model||'').slice(0,20)}')">＋ افزودن</button>`
+          : `<button class="btn btn-green" onclick="quickAdd(event, '${escapeHtml(f.ip)}','${escapeHtml((f.model||'').slice(0,20))}')">＋ افزودن</button>`
         }
       </div>`;
     }).join('');
@@ -1696,7 +1755,7 @@ async function quickAdd(event, ip, model) {
   btn.textContent = '⏳';
   
   try {
-    const r = await fetch(`${API}/api/printers/add`, {
+    const r = await apiFetch(`${API}/api/printers/add`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ip, name: model, community })
@@ -1727,7 +1786,7 @@ async function quickAdd(event, ip, model) {
 async function clearLogs(ip) {
   if (!canAdmin()) { toast('دسترسی ندارید', 'e'); return; }
   if (!confirm('رویدادهای غیر از PRINT، SERVICE و REFILL پاک شوند؟\nاطلاعات PRINT، SERVICE و REFILL حفظ می‌مانند.')) return;
-  const r = await fetch(`${API}/api/logs/clear`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ip?{ip}:{})});
+  const r = await apiFetch(`${API}/api/logs/clear`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ip?{ip}:{})});
   if (r.ok) {
     const j = await r.json();
     toast(`${j.deleted || 0} رویداد پاک شد — PRINT، SERVICE و REFILL حفظ شد`, 'w');
@@ -1792,7 +1851,7 @@ async function editNickname(ip, currentNickname) {
   if (!canAdmin()) { toast('دسترسی ندارید', 'e'); return; }
   openNicknameModal(ip, currentNickname, async (ip, newNick) => {
     try {
-      const r = await fetch(`${API}/api/printer/${ip}/rename`, {
+      const r = await apiFetch(`${API}/api/printer/${ip}/rename`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nickname: newNick })
@@ -1869,7 +1928,7 @@ async function submitManualEvent() {
   btn.textContent = '⏳ در حال ثبت...';
 
   try {
-    const r = await fetch(`${API}/api/events/manual`, {
+    const r = await apiFetch(`${API}/api/events/manual`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ip, type, notes, technician: tech }),
@@ -1899,12 +1958,21 @@ async function submitManualEvent() {
 // ══════════════════════════════════════════════════
 async function triggerPoll() {
   try {
-    const res = await fetch(`${API}/api/poll/now`, { method: 'POST' });
-    if (!res.ok) {
-      const errBody = await res.text();
-      throw new Error(`HTTP ${res.status}: ${errBody}`);
+    const res = await apiFetch(`${API}/api/poll/now`, { method: 'POST' });
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (_) {
+      data = {};
     }
-    const data = await res.json();
+
+    if (!res.ok) {
+      if (data.error === 'csrf_token_invalid') {
+        throw new Error('SESSION_EXPIRED');
+      }
+      throw new Error(data.error || data.message || `HTTP ${res.status}`);
+    }
+
     if (data.status !== 'started') {
       throw new Error(data.error || 'Unexpected response');
     }
@@ -1912,7 +1980,11 @@ async function triggerPoll() {
     setTimeout(fetchData, 2500);
   } catch (err) {
     console.error('Pull failed:', err);
-    toast('خطا در شروع Pull', 'e');
+    if (String(err?.message || err) === 'SESSION_EXPIRED') {
+      toast('نشست شما منقضی شده است. صفحه را تازه کنید و دوباره تلاش کنید.', 'e');
+    } else {
+      toast('خطا در شروع Pull', 'e');
+    }
   }
 }
 
@@ -1947,6 +2019,92 @@ function toast(msg, cls='') {
 function fmtN(n) {
   if(n==null||n===undefined) return '—';
   return Number(n).toLocaleString('en');
+}
+
+function hasNumericCounterValue(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function _extraCountersStorageKey(ip) {
+  return `${EXTRA_COUNTERS_ACCORDION_KEY}:${ip}`;
+}
+
+function getExtraCountersAccordionState(ip) {
+  try {
+    return localStorage.getItem(_extraCountersStorageKey(ip)) === '1';
+  } catch (e) {
+    return false;
+  }
+}
+
+function setExtraCountersAccordionState(ip, isOpen) {
+  try {
+    localStorage.setItem(_extraCountersStorageKey(ip), isOpen ? '1' : '0');
+  } catch (e) {
+    console.warn('extra counters accordion state not persisted:', e);
+  }
+}
+
+function toggleExtraCountersAccordion(ip) {
+  const safeIp = String(ip || '').replace(/\./g, '-');
+  const body = document.getElementById(`extra-counters-body-${safeIp}`);
+  const header = document.getElementById(`extra-counters-header-${safeIp}`);
+  if (!body || !header) return;
+  const shouldOpen = !body.classList.contains('open');
+  body.classList.toggle('open', shouldOpen);
+  header.classList.toggle('open', shouldOpen);
+  setExtraCountersAccordionState(ip, shouldOpen);
+}
+
+const EXTRA_COUNTER_HELP = {
+  'Printer': {
+    title: 'تعداد چاپ مستقیم',
+    subtitle: 'چاپ‌های ارسال‌شده از رایانه یا شبکه'
+  },
+  'Copy': {
+    title: 'تعداد کپی',
+    subtitle: 'کپی‌های گرفته‌شده از روی دستگاه'
+  },
+  'Fax': {
+    title: 'تعداد فکس',
+    subtitle: 'فکس‌های ثبت‌شده توسط دستگاه'
+  },
+  'List': {
+    title: 'تعداد لیست/گزارش',
+    subtitle: 'چاپ گزارش‌ها یا صفحات سیستمی دستگاه'
+  },
+  'Scan FC': {
+    title: 'اسکن رنگی محلی',
+    subtitle: 'تعداد اسکن‌های رنگی انجام‌شده از روی خود دستگاه'
+  },
+  'Scan BW': {
+    title: 'اسکن سیاه‌وسفید محلی',
+    subtitle: 'تعداد اسکن‌های سیاه‌وسفید انجام‌شده از روی خود دستگاه'
+  },
+  'Net Scan FC': {
+    title: 'اسکن رنگی شبکه‌ای',
+    subtitle: 'تعداد اسکن‌های رنگی ارسال‌شده از طریق شبکه یا مقصدهای راه دور'
+  },
+  'Net Scan BW': {
+    title: 'اسکن سیاه‌وسفید شبکه‌ای',
+    subtitle: 'تعداد اسکن‌های سیاه‌وسفید ارسال‌شده از طریق شبکه یا مقصدهای راه دور'
+  }
+};
+
+function renderExtraCounterLabel(label) {
+  const meta = EXTRA_COUNTER_HELP[label];
+  if (!meta) {
+    return `<span class="counter-help-main">${escapeHtml(label)}</span>`;
+  }
+  const tooltipText = `${meta.title} — ${meta.subtitle}`;
+  return `
+    <span class="counter-help-label">
+      <span class="counter-help-topline">
+        <span class="counter-help-main">${escapeHtml(label)}</span>
+        <span class="counter-help-icon" title="${escapeHtml(tooltipText)}" aria-label="راهنمای ${escapeHtml(label)}">❓</span>
+      </span>
+      <span class="counter-help-sub">${escapeHtml(meta.title)}</span>
+    </span>`;
 }
 
 // ══════════════════════════════════════════════════
@@ -2143,17 +2301,7 @@ async function loadPrinterDailyChart(ip) {
   const oldMessage = container.querySelector('.printer-chart-empty');
   if (oldMessage) oldMessage.remove();
 
-  const existing = printerChartInstances[ip];
-  if (existing) {
-    try {
-      if (typeof existing.destroy === 'function') {
-        existing.destroy();
-      }
-    } catch (e) {
-      console.error('Printer chart destroy error:', e);
-    }
-    delete printerChartInstances[ip];
-  }
+  destroyPrinterDailyChart(ip);
 
   const url = `${API}/api/stats/daily?days=30&ip=${encodeURIComponent(ip)}`;
   console.debug('Loading printer daily chart from', url);

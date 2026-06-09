@@ -157,7 +157,7 @@ def collect_hp(ip: str, name: str, community: str, start: float) -> dict:
         _counters_event(ip, total, prev, alerts, [a["code"] for a in alerts],
                 full_color=full_color, black_white=bw, paper_size=None,
                 current_toner_level=black_level, prev_toner_level=prev_toner,
-                uptime=ut)
+                uptime=ut, poll_timestamp=datetime.fromtimestamp(start).isoformat())
 
         color_info = f"color={color_print}" if color_print >= 0 else ("has_color_toner" if has_color_toner else "mono")
         copies_str = f"copy={copy_total:,}" if copy_total > 0 else "nodata"

@@ -12,8 +12,10 @@ import os
 import threading
 import logging
 
+from datetime import datetime
+
 from config.settings import PRINTERS_FILE, DEFAULT_PRINTERS
-from core.database import load_printer_counters, save_printer_counters
+from core.database import load_printer_counters, save_printer_counters, update_missing_yield_list, record_toner_snapshot
 
 log = logging.getLogger("PrinterMonitor")
 
@@ -67,8 +69,10 @@ class PrevStore:
         with self._lock:
             try:
                 existing = self._cache.get(ip) or load_printer_counters(ip) or {}
-                # ✅ اصلاح: ادغام امن با حفظ مقادیر مهم override
+                updated_at = data.get("updated_at") or datetime.now().isoformat()
+                # ✅ اصلاح: ادغام امن با حفظ مقادیر مهم override و متادیتا
                 normalized = {
+                    "device_type": existing.get("device_type"),
                     "toner_level": existing.get("toner_level"),
                     "last_alert_codes": existing.get("last_alert_codes", []),
                     "manual_override": existing.get("manual_override", 0),
@@ -77,12 +81,28 @@ class PrevStore:
                     "override_start_total": existing.get("override_start_total"),
                     "override_start_toner": existing.get("override_start_toner"),
                     "yield_per_page": existing.get("yield_per_page", 2000),
+                    "force_estimate": existing.get("force_estimate", 0),
+                    "yield_learning_failures": existing.get("yield_learning_failures", 0),
+                    "updated_at": existing.get("updated_at"),
                     **existing,
-                    **data
+                    **data,
+                    "updated_at": updated_at,
                 }
                 self._cache[ip] = normalized.copy()
                 save_printer_counters(ip, normalized)
-                log.debug(f"PrevStore.set: {ip} -> total={normalized.get('print_total')} toner={normalized.get('toner_level')}")
+                record_toner_snapshot(
+                    ip,
+                    print_total=normalized.get("print_total"),
+                    toner_level=normalized.get("toner_level"),
+                    yield_per_page=normalized.get("yield_per_page"),
+                    timestamp=updated_at,
+                    source="prev_store",
+                )
+                update_missing_yield_list(ip, int(normalized.get("yield_per_page") or 2000))
+                log.debug(
+                    f"PrevStore.set: {ip} -> total={normalized.get('print_total')} "
+                    f"toner={normalized.get('toner_level')} updated_at={updated_at}"
+                )
             except Exception as e:
                 log.error(f"PrevStore.set error for {ip}: {e}")
 
@@ -90,6 +110,7 @@ class PrevStore:
         """حذف مقادیر یک پرینتر (در صورت حذف پرینتر)."""
         with self._lock:
             self._cache.pop(ip, None)
+            update_missing_yield_list(ip, -1)
             # در دیتابیس هم می‌توان حذف کرد، ولی فعلاً نیازی نیست
 
     def is_initialized(self, ip: str) -> bool:

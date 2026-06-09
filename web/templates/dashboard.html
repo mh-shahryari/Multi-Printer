@@ -44,6 +44,9 @@
         {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'admin' and current_user.can_access_module('users') %}
         <a class="topbar-dropdown-item" href="{{ url_for('users.users_page') }}">👤 مدیریت کاربران</a>
         {% endif %}
+        {% if current_user.is_authenticated and current_user.is_verified and current_user.role == 'admin' %}
+        <a class="topbar-dropdown-item" href="{{ url_for('security_audit.security_page') }}">🛡️ امنیت سیستم</a>
+        {% endif %}
         <div class="topbar-dropdown-divider"></div>
         <div class="topbar-dropdown-item" onclick="toggleTheme();closeTopbarMenu()">
           <span id="theme-label">🌙 تم تاریک</span>

@@ -42,6 +42,7 @@ def create_app() -> Flask:
         GOOGLE_CLIENT_SECRET=settings.GOOGLE_CLIENT_SECRET,
         RECAPTCHA_SITE_KEY=settings.RECAPTCHA_SITE_KEY,
         RECAPTCHA_SECRET_KEY=settings.RECAPTCHA_SECRET_KEY,
+        ASSET_VERSION=os.getenv("ASSET_VERSION", "20260609-2"),
     )
 
     init_auth(app)

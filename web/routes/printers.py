@@ -3,11 +3,11 @@ import logging
 from flask import Blueprint, jsonify, request
 from flask_login import current_user
 from core import store
-from core.database import add_event, save_printer_counters
+from core.database import add_event
 from core.poller import collect, poll_one
 from core.oid.scanner import scan_printer_oids
-from config.settings import POLL_INTERVAL
-from web.auth import user_can_access_office, allowed_printer_ips, user_allowed_offices
+from config.settings import POLL_INTERVAL, TONER_ALERT_THRESHOLDS
+from web.auth import user_can_access_office, allowed_printer_ips, user_allowed_offices, admin_required
 
 log = logging.getLogger("PrinterMonitor")
 
@@ -60,6 +60,84 @@ def debug_printer(ip):
     if data is None:
         return jsonify({"error": "not found"}), 404
     return jsonify(data)
+
+
+@bp.route('/api/debug/brother-toner/<path:ip>')
+@admin_required
+def debug_brother_toner(ip):
+    """Endpoint موقت برای بررسی raw OIDهای تونر Brother."""
+    if not user_can_access_office(current_user, ip):
+        return jsonify({"error": "forbidden"}), 403
+
+    from core.enhanced_collector import (
+        detect_snmp_version,
+        walk_supplies_table,
+        BROTHER_TONER_OID,
+        BROTHER_DRUM_OID,
+    )
+    from core.snmp.protocol import snmp_get_with_fallback
+
+    community = "public"
+    printer_name = ip
+    with store.printers_lock:
+        for printer in store.PRINTERS:
+            if printer.get("ip") == ip:
+                community = printer.get("community", "public") or "public"
+                printer_name = printer.get("name") or ip
+                break
+
+    snmp_version = detect_snmp_version(ip, community, timeout=2.0)
+
+    raw_standard = []
+    for idx in range(1, 9):
+        name_oid = f"1.3.6.1.2.1.43.11.1.1.6.1.{idx}"
+        type_oid = f"1.3.6.1.2.1.43.11.1.1.5.1.{idx}"
+        max_oid = f"1.3.6.1.2.1.43.11.1.1.8.1.{idx}"
+        rem_oid = f"1.3.6.1.2.1.43.11.1.1.9.1.{idx}"
+        name_val = snmp_get_with_fallback(ip, name_oid, community, version=snmp_version, timeout=2.0)
+        type_val = snmp_get_with_fallback(ip, type_oid, community, version=snmp_version, timeout=2.0)
+        max_val = snmp_get_with_fallback(ip, max_oid, community, version=snmp_version, timeout=2.0)
+        rem_val = snmp_get_with_fallback(ip, rem_oid, community, version=snmp_version, timeout=2.0)
+        if all(v is None for v in (name_val, type_val, max_val, rem_val)):
+            continue
+        raw_standard.append({
+            "index": idx,
+            "name_oid": name_oid,
+            "name": name_val,
+            "type_oid": type_oid,
+            "type": type_val,
+            "max_oid": max_oid,
+            "max": max_val,
+            "remaining_oid": rem_oid,
+            "remaining": rem_val,
+        })
+
+    interpreted = walk_supplies_table(
+        ip,
+        community,
+        brand="brother",
+        snmp_version=snmp_version,
+        timeout=2.0,
+    )
+
+    with store.data_lock:
+        current_data = store.printer_data.get(ip, {}) or {}
+
+    return jsonify({
+        "ip": ip,
+        "name": printer_name,
+        "community": community,
+        "snmp_version": snmp_version,
+        "raw_oids": {
+            "brother_toner_oid": BROTHER_TONER_OID,
+            "brother_toner_value": snmp_get_with_fallback(ip, BROTHER_TONER_OID, community, version=snmp_version, timeout=2.0),
+            "brother_drum_oid": BROTHER_DRUM_OID,
+            "brother_drum_value": snmp_get_with_fallback(ip, BROTHER_DRUM_OID, community, version=snmp_version, timeout=2.0),
+            "standard_supplies": raw_standard,
+        },
+        "interpreted_supplies": interpreted,
+        "current_dashboard_toners": (current_data.get("toners") or {}),
+    })
 
 
 @bp.route('/api/printers/add', methods=['POST'])
@@ -241,6 +319,10 @@ def toner_reset(ip):
         if new_level < 0 or new_level > 100:
             return jsonify({"error": "new_level must be between 0 and 100"}), 400
 
+        warning_threshold = TONER_ALERT_THRESHOLDS.get('warning', 15)
+        critical_threshold = TONER_ALERT_THRESHOLDS.get('critical', 5)
+        toner_alert_codes = set()
+
         with store.data_lock:
             printer = store.printer_data.get(ip)
             if printer is None:
@@ -251,15 +333,60 @@ def toner_reset(ip):
             toners[color]['level'] = new_level
             if new_level == 0:
                 status = 'empty'
-            elif new_level <= 5:
+            elif new_level <= critical_threshold:
                 status = 'critical'
-            elif new_level <= 15:
+            elif new_level <= warning_threshold:
                 status = 'low'
             else:
                 status = 'ok'
             toners[color]['status'] = status
 
+            if isinstance(printer.get('counters'), dict):
+                printer['counters']['pages_since_last_reset'] = 0
+
+            if new_level > warning_threshold:
+                # هشدارهای مرتبط با تونر را بلافاصله از وضعیت فعال حذف کن.
+                toner_alert_codes = {
+                    ((toner_data.get('index') if isinstance(toner_data, dict) else None) or toner_color)
+                    for toner_color, toner_data in toners.items()
+                }
+                toner_alert_code_strs = {str(code) for code in toner_alert_codes}
+                printer['alerts'] = [
+                    alert for alert in (printer.get('alerts') or [])
+                    if str(alert.get('code')) not in toner_alert_code_strs
+                ]
+
         prev = store._prev.get(ip) or {}
+        current_total = printer.get('counters', {}).get('total', 0) if isinstance(printer.get('counters'), dict) else 0
+
+        learned_yield = prev.get('yield_per_page', 2000)
+        if prev.get('force_estimate') and prev.get('override_start_total') is not None:
+            try:
+                pages_since_last_override = int(current_total) - int(prev.get('override_start_total'))
+                consumed_pct = int(prev.get('override_start_toner', 100) or 100) - int(prev.get('toner_level') or 0)
+                if pages_since_last_override > 0 and consumed_pct > 0:
+                    estimated_yield = int(round(pages_since_last_override * 100.0 / consumed_pct))
+                    if 300 <= estimated_yield <= 20000:
+                        current_yield = int(prev.get('yield_per_page', 2000) or 2000)
+                        if current_yield == 2000:
+                            learned_yield = estimated_yield
+                        else:
+                            learned_yield = int(round((current_yield * 0.7) + (estimated_yield * 0.3)))
+                        log.info(
+                            "manual toner reset yield update for %s: %s -> %s (pages=%s, consumed_pct=%s)",
+                            ip, current_yield, learned_yield, pages_since_last_override, consumed_pct,
+                        )
+            except Exception as exc:
+                log.exception("manual toner reset yield learning failed for %s: %s", ip, exc)
+
+        toner_alert_code_strs = {str(code) for code in toner_alert_codes}
+        if new_level > warning_threshold:
+            cleared_alert_codes = [
+                code for code in (prev.get('alert_codes', []) or [])
+                if str(code) not in toner_alert_code_strs
+            ]
+        else:
+            cleared_alert_codes = prev.get('alert_codes', [])
         new_prev = {
             'print_total': prev.get('print_total'),
             'full_color': prev.get('full_color'),
@@ -268,15 +395,16 @@ def toner_reset(ip):
             'manual_override': 1,
             'override_color': color,
             'override_base_level': new_level,
-            'override_start_total': printer.get('counters', {}).get('total', 0) if isinstance(printer.get('counters'), dict) else 0,
+            'override_start_total': current_total,
             'override_start_toner': new_level,
-            'yield_per_page': prev.get('yield_per_page', 2000),
-            'alert_codes': prev.get('alert_codes', []),
-            'last_alert_codes': prev.get('last_alert_codes', []),
+            'yield_per_page': learned_yield,
+            'force_estimate': prev.get('force_estimate', 0),
+            'yield_learning_failures': prev.get('yield_learning_failures', 0),
+            'alert_codes': cleared_alert_codes,
+            'last_alert_codes': cleared_alert_codes,
             'uptime': prev.get('uptime'),
         }
         store._prev.set(ip, new_prev)
-        save_printer_counters(ip, store._prev.get(ip))
 
         username = current_user.username if current_user.is_authenticated else 'سیستم'
         add_event(ip, 'REFILL', {
@@ -285,6 +413,10 @@ def toner_reset(ip):
             'username': username,
             'manual_reset': True,
             'auto_detected': False,
+            'reset_color': color,
+            'set_level': new_level,
+            'total_at_reset': current_total,
+            'yield_per_page_at_reset': learned_yield,
         })
 
         return jsonify({'status': 'ok'})

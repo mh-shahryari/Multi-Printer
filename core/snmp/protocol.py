@@ -12,6 +12,7 @@
 import socket
 import threading
 import logging
+import time
 
 log = logging.getLogger("PrinterMonitor")
 
@@ -23,43 +24,90 @@ SNMP_ERROR_NAMES = {
     15: "undoFailed", 16: "authorizationError", 17: "notWritable", 18: "inconsistentName"
 }
 
-# ─── کش نسخه SNMP برای هر IP ──────────────────────────────────────
-# مقدار: 1 یا 2 (نسخه ترجیحی) یا None (هنوز تست نشده)
+# ─── کش نسخه SNMP برای هر IP/community ────────────────────────────
+# هر ورودی به شکل زیر ذخیره می‌شود:
+#   {"version": 1|2|None, "expires_at": monotonic_ts|None}
+# برای نسخه‌های ناموفق (offline / timeout) negative-cache با TTL کوتاه نگه می‌داریم
+# تا در هر pull دوباره probe نشود.
 _SNMP_VERSION_CACHE = {}
 _version_cache_lock = threading.Lock()
+_NEGATIVE_CACHE_TTL = 30.0
+_POSITIVE_CACHE_TTL = 3600.0
+
+
+def _version_cache_key(ip: str, community: str) -> str:
+    return f"{ip}|{community}"
+
+
+
+def _get_cached_version(ip: str, community: str):
+    key = _version_cache_key(ip, community)
+    with _version_cache_lock:
+        entry = _SNMP_VERSION_CACHE.get(key)
+        if entry is None and ip in _SNMP_VERSION_CACHE:
+            # backward compatibility با کش‌های قدیمی فقط بر پایه IP
+            legacy = _SNMP_VERSION_CACHE.get(ip)
+            if legacy in (1, 2, None):
+                entry = {"version": legacy, "expires_at": None if legacy in (1, 2) else time.monotonic() + _NEGATIVE_CACHE_TTL}
+                _SNMP_VERSION_CACHE[key] = entry
+                _SNMP_VERSION_CACHE.pop(ip, None)
+        if not isinstance(entry, dict):
+            return False, None
+        expires_at = entry.get("expires_at")
+        if expires_at is not None and time.monotonic() >= expires_at:
+            _SNMP_VERSION_CACHE.pop(key, None)
+            return False, None
+        return True, entry.get("version")
+
+
+
+def _set_cached_version(ip: str, community: str, version: int | None, ttl: float | None):
+    key = _version_cache_key(ip, community)
+    with _version_cache_lock:
+        _SNMP_VERSION_CACHE[key] = {
+            "version": version,
+            "expires_at": (time.monotonic() + ttl) if ttl is not None else None,
+        }
+
+
+
+def _clear_cached_version(ip: str, community: str):
+    key = _version_cache_key(ip, community)
+    with _version_cache_lock:
+        _SNMP_VERSION_CACHE.pop(key, None)
+        _SNMP_VERSION_CACHE.pop(ip, None)
+
 
 
 def _detect_snmp_version(ip: str, community: str, port: int = 161, probe_timeout: float = 1.5) -> int | None:
     """
     تشخیص نسخه SNMP با تست sysUptime (1.3.6.1.2.1.1.3.0).
     ابتدا v1 را تست می‌کند (چون رایج‌تر است)، سپس v2c.
-    برمی‌گرداند: 1 یا 2 (نسخه موفق). نتیجه در کش ذخیره می‌شود.
+    نتیجه در cache ذخیره می‌شود؛ برای عدم پاسخ نیز negative-cache کوتاه نگه می‌داریم.
     """
-    with _version_cache_lock:
-        if ip in _SNMP_VERSION_CACHE:
-            return _SNMP_VERSION_CACHE[ip]
+    found, cached_version = _get_cached_version(ip, community)
+    if found:
+        return cached_version
 
     probe_oid = "1.3.6.1.2.1.1.3.0"
 
     # 🔥 تغییر: اول v1 تست می‌شود (چون در شبکه‌های واقعی رایج‌تر است)
     res_v1 = snmp_get(ip, probe_oid, community, port, probe_timeout, version=1)
     if res_v1 is not None:
-        with _version_cache_lock:
-            _SNMP_VERSION_CACHE[ip] = 1
+        _set_cached_version(ip, community, 1, _POSITIVE_CACHE_TTL)
         log.debug(f"SNMP cache: {ip} -> v1")
         return 1
 
     # تست v2c
     res_v2 = snmp_get(ip, probe_oid, community, port, probe_timeout, version=2)
     if res_v2 is not None:
-        with _version_cache_lock:
-            _SNMP_VERSION_CACHE[ip] = 2
+        _set_cached_version(ip, community, 2, _POSITIVE_CACHE_TTL)
         log.info(f"SNMP cache: {ip} -> v2c (v1 failed)")
         return 2
 
     # هیچ‌یک پاسخ ندادند؛ احتمالاً دستگاه آفلاین یا SNMP مسدود است.
-    log.debug(f"SNMP cache: {ip} unreachable (both versions failed)")
-    # برگرداندن None به معنی عدم شناسایی نسخه — caller باید این حالت را مدیریت کند
+    log.debug(f"SNMP cache: {ip} unreachable (both versions failed, cached for {_NEGATIVE_CACHE_TTL:.0f}s)")
+    _set_cached_version(ip, community, None, _NEGATIVE_CACHE_TTL)
     return None
 
 
@@ -263,14 +311,13 @@ def snmp_get_with_fallback(ip: str, oid: str, community: str = "public",
     other_version = 2 if version == 1 else 1
     result_other = snmp_get(ip, oid, community, port, timeout, request_id, version=other_version)
     if result_other is not None:
-        with _version_cache_lock:
-            _SNMP_VERSION_CACHE[ip] = other_version
+        _set_cached_version(ip, community, other_version, _POSITIVE_CACHE_TTL)
         log.info(f"SNMP cache updated: {ip} -> v{other_version} (v{version} failed)")
         return result_other
 
-    # هر دو نسخه ناموفق → کش قبلی ممکن است اشتباه باشد، پاکش می‌کنیم
-    with _version_cache_lock:
-        _SNMP_VERSION_CACHE.pop(ip, None)
+    # هر دو نسخه ناموفق → فعلاً negative-cache کوتاه بگذار تا دوباره probe نشود
+    _clear_cached_version(ip, community)
+    _set_cached_version(ip, community, None, _NEGATIVE_CACHE_TTL)
     return None
 
 
