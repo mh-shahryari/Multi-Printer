@@ -12,6 +12,7 @@ from core.snmp.protocol import snmp_get_bulk, snmp_get_with_fallback
 from core.snmp.oid_map import OIDS, PAPER_SIZE_MAP, TONER_STATUS, TONER_LEVEL
 from core.collectors.base import si, ss, _counters_event, validate_counter_consistency
 from core import store
+from core.database import add_event
 
 log = logging.getLogger("PrinterMonitor")
 

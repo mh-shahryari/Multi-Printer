@@ -132,9 +132,14 @@ def _save_counters_to_db(ip: str, total: int, color, bw, black_level,
                     for s in supplies if s["percent"] is not None
                 ]
             }
+            # 🔥 اصلاح: ذخیره toner_data در alert_codes باعث آلودگی دیتابیس می‌شد
+            # در عوض فقط کدهای هشدار در alert_codes و لیست تونرها در last_alert_codes ذخیره می‌شود
+            alert_codes_json = json.dumps([a["code"] for a in alerts], ensure_ascii=False)
+            toner_data_json = json.dumps(toner_data, ensure_ascii=False)
+            
             conn.execute('''
                 UPDATE printer_counters SET alert_codes = ?, last_alert_codes = ? WHERE ip = ?
-            ''', (json.dumps(toner_data, ensure_ascii=False), json.dumps([a["code"] for a in alerts]), ip))
+            ''', (alert_codes_json, toner_data_json, ip))
     except Exception as e:
         log.error(f"خطا در ذخیره enhanced data در دیتابیس: {e}")
 

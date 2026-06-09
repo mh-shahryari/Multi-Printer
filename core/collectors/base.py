@@ -104,7 +104,14 @@ def apply_toner_override(ip: str, total: int, snmp_level: int = None, color: str
     except Exception:
         return None
 
-    if pages_since_override <= 0:
+    # 🔥 اصلاح: اگر total کمتر از override_start_total باشد، یعنی دستگاه
+    # ریست شده و override دیگر معتبر نیست → برگرداندن مقدار خام سنسور
+    if pages_since_override < 0:
+        log.debug(f"  [{ip}] Toner override invalidated: total({total}) < start({override_start_total}). "
+                  f"Returning raw SNMP level: {snmp_level}")
+        return snmp_level
+
+    if pages_since_override == 0:
         return override_start_toner
 
     if not isinstance(yield_per_page, int) or yield_per_page <= 0:
@@ -226,7 +233,7 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
     reason = None
 
     # ✅ باگ #4: تشخیص بهتر کاهش شمارنده + ریبوت
-    # حالت ۱: کاهش شمارنده (هر مقداری)
+    # حالت ۱: کاهش شمارنده (هر مقداری) → نشانه ریست دستگاه
     if total < prev_total:
         skip_print = True
         is_reboot = (uptime is not None and prev_uptime is not None and 
@@ -244,7 +251,9 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
             "is_reboot": is_reboot,
         })
         log.warning(f"  [{ip}] {reason}")
-        # ذخیره مقدار جدید برای جلوگیری از تکرار رویداد
+        # 🔥 اصلاح: پاکسازی مقادیر override هنگام ریست دستگاه
+        # اگر override را پاک نکنیم، چون total جدید < override_start_total است،
+        # محاسبه تونر منفی شده و سطح تونر روی درصد قبلی فریز می‌شود.
         store._prev.set(ip, {
             "print_total": total,
             "toner_level": current_toner_level,
@@ -255,6 +264,13 @@ def _counters_event(ip: str, total: int, prev: dict, alerts: list, curr_codes: l
             "uptime": uptime,
             "a3_total": a3_total,
             "a4_total": a4_total,
+            # ✅ ریست کردن override برای جلوگیری از فریز شدن تونر
+            "manual_override": 0,
+            "override_color": None,
+            "override_base_level": None,
+            "override_start_total": None,
+            "override_start_toner": None,
+            "yield_per_page": 2000,
         })
         return
 

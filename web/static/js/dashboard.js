@@ -290,10 +290,16 @@ function renderPrinterCard(p) {
   const bw = c.black_white || 0;
   const toners = p.toners || {};
 
-  const cyanLevel = toners.cyan?.level || 0;
-  const magentaLevel = toners.magenta?.level || 0;
-  const yellowLevel = toners.yellow?.level || 0;
-  const blackLevel = toners.black?.level || 0;
+  const cyanLevel = toners.cyan?.level;
+  const magentaLevel = toners.magenta?.level;
+  const yellowLevel = toners.yellow?.level;
+  const blackLevel = toners.black?.level;
+
+  // ✅ باگ #7: تشخیص صحیح وضعیت undefined برای نوارهای تونر
+  const cyanHasData = cyanLevel !== null && cyanLevel !== undefined;
+  const magentaHasData = magentaLevel !== null && magentaLevel !== undefined;
+  const yellowHasData = yellowLevel !== null && yellowLevel !== undefined;
+  const blackHasData = blackLevel !== null && blackLevel !== undefined;
 
   const cls = online === true ? 'oc-online' : (online === false ? 'oc-offline' : '');
   const warnCls = (p.alerts?.length) ? 'oc-warn' : cls;
@@ -319,23 +325,25 @@ function renderPrinterCard(p) {
   }
   if (!officeName) officeName = 'سایر';
 
+  // ✅ باگ #7: نمایش صحیح تونرهای نامشخص (جلوگیری از نمایش 0% وقتی مقدار null است)
+  // ✅ باگ #7: نمایش صحیح تونرهای نامشخص (جلوگیری از نمایش 0% وقتی مقدار null است)
   const colorTonersHtml = `
     <div class="oc-toner-group">
       <div class="oc-toner-item">
-        <div class="oc-toner-bar" style="width: ${cyanLevel}%; background: #00d4ff;"></div>
+        <div class="oc-toner-bar" style="width: ${cyanHasData ? cyanLevel : 0}%; background: ${cyanHasData ? '#00d4ff' : '#555'};"></div>
       </div>
       <div class="oc-toner-item">
-        <div class="oc-toner-bar" style="width: ${magentaLevel}%; background: #ea80fc;"></div>
+        <div class="oc-toner-bar" style="width: ${magentaHasData ? magentaLevel : 0}%; background: ${magentaHasData ? '#ea80fc' : '#555'};"></div>
       </div>
       <div class="oc-toner-item">
-        <div class="oc-toner-bar" style="width: ${yellowLevel}%; background: #ffd740;"></div>
+        <div class="oc-toner-bar" style="width: ${yellowHasData ? yellowLevel : 0}%; background: ${yellowHasData ? '#ffd740' : '#555'};"></div>
       </div>
     </div>
   `;
 
   const blackTonerHtml = `
     <div class="oc-toner-item">
-      <div class="oc-toner-bar" style="width: ${blackLevel}%; background: #9e9e9e;"></div>
+      <div class="oc-toner-bar" style="width: ${blackHasData ? blackLevel : 0}%; background: ${blackHasData ? '#9e9e9e' : '#555'};"></div>
     </div>
   `;
 
@@ -846,8 +854,9 @@ function buildPrinterDetail(p) {
           ${nicknameButtonHtml}
        </div>`;
 
+  // ✅ باگ #6: حذف دکمه حذف تکراری — فقط printerDeleteButtonHtml استفاده می‌شود
   const printerDeleteButtonHtml = canEditPrinters()
-    ? `<button class="btn btn-orange" onclick="removePrinter('${p.ip}','${p.name}')" style="font-size:10px">× حذف</button>`
+    ? `<button class="btn btn-sm btn-orange" onclick="removePrinter('${p.ip}','${escapeHtml(p.name)}')" style="font-size:9px">× حذف</button>`
     : '';
 
   const printerLogActionsHtml = canAdmin()
@@ -961,7 +970,7 @@ function buildPrinterDetail(p) {
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           <div style="text-align:center"><div style="font-family:var(--mono);font-size:9px;color:var(--text3)">Response</div><div style="font-family:var(--mono);font-size:13px;color:var(--cyan)">${p.poll_ms}ms</div></div>
-          <button class="btn btn-orange" onclick="removePrinter('${p.ip}','${p.name}')" style="font-size:10px">× حذف</button>
+          ${printerDeleteButtonHtml}
         </div>
       </div>
     </div>
@@ -1663,14 +1672,14 @@ async function doDiscover() {
       return `
       <div class="discover-item${isExist ? ' discover-existing' : ''}">
         <div>
-          <div class="discover-ip">${f.ip}
+          <div class="discover-ip">${escapeHtml(f.ip)}
             ${isExist ? '<span class="discover-badge">موجود</span>' : ''}
           </div>
-          <div class="discover-model">${f.model}</div>
+          <div class="discover-model">${escapeHtml(f.model || '')}</div>
         </div>
         ${isExist
           ? '<span style="font-size:10px;color:var(--text3);font-family:var(--mono)">قبلاً اضافه شده</span>'
-          : `<button class="btn btn-green" onclick="quickAdd(event, '${f.ip}','${(f.model||'').slice(0,20)}')">＋ افزودن</button>`
+          : `<button class="btn btn-green" onclick="quickAdd(event, '${escapeHtml(f.ip)}','${escapeHtml((f.model||'').slice(0,20))}')">＋ افزودن</button>`
         }
       </div>`;
     }).join('');
