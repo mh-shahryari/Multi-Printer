@@ -23,8 +23,12 @@ from core.collectors.base import si, detect_brand
 # 🔥 تغییر: استفاده از enhanced_collector به جای کالکتورهای جداگانه
 from core.collectors.base_enhanced import collect_enhanced
 
-# کالکتورهای قدیمی (فقط برای سنسور保留)
+# fallback به collectorهای برند-محور برای حفظ ثبت رویدادها در صورت خطای enhanced
 from core.collectors.sensor import collect_sensor
+from core.collectors.toshiba import collect_toshiba
+from core.collectors.hp import collect_hp
+from core.collectors.canon import collect_canon
+from core.collectors.brother import collect_brother
 
 log = logging.getLogger("PrinterMonitor")
 
@@ -99,8 +103,26 @@ def collect(printer: dict) -> dict:
         result["device_type"] = result.get("device_type", device_type)
         return result
     except Exception as e:
-        log.error(f"Enhanced collector failed for {ip}: {e}, falling back to basic")
-        # ✅ باگ #3: حفظ مقدار قبلی به جای total=0 (جلوگیری از از دست رفتن چاپ)
+        log.error(f"Enhanced collector failed for {ip}: {e}, falling back to legacy collector")
+
+        legacy_collectors = {
+            "toshiba": collect_toshiba,
+            "hp": collect_hp,
+            "canon": collect_canon,
+            "brother": collect_brother,
+        }
+        legacy_collector = legacy_collectors.get(brand)
+        if legacy_collector is not None:
+            try:
+                result = legacy_collector(ip, name, community, start)
+                result["nickname"] = nickname
+                result["device_type"] = result.get("device_type", device_type)
+                result["error"] = str(e)
+                return result
+            except Exception as legacy_error:
+                log.exception("Legacy collector also failed for %s: %s", ip, legacy_error)
+
+        # آخرین fallback: حفظ snapshot قبلی به جای صفر کردن شمارنده‌ها
         prev = store._prev.get(ip) or {}
         prev_total = prev.get("print_total", 0) or 0
         elapsed = int((time.time() - start) * 1000)
@@ -111,7 +133,7 @@ def collect(printer: dict) -> dict:
             "poll_ms": elapsed,
             "device": {"model": "Unknown", "serial": "N/A", "firmware": "N/A", "uptime_str": "N/A"},
             "counters": {
-                "total": prev_total,  # ✅ حفظ مقدار قبلی به جای 0
+                "total": prev_total,
                 "full_color": prev.get("full_color"),
                 "black_white": prev.get("black_white", 0),
             },

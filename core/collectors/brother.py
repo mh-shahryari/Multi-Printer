@@ -67,6 +67,18 @@ def collect_brother(ip: str, name: str, community: str, start: float) -> dict:
 
         toners = {}
         has_color_toner = False
+
+        # ابتدا OID اختصاصی Brother را برای تونر مشکی امتحان کن.
+        brother_black = si(g("1.3.6.1.4.1.2435.2.3.9.4.2.1.5.5.1.1"), -1)
+        if 0 <= brother_black <= 100:
+            toners["black"] = {
+                "level": brother_black,
+                "status": ("empty" if brother_black == 0 else "critical" if brother_black <= 10 else "low" if brother_black <= 25 else "ok"),
+                "name": "Black Toner",
+                "remaining": brother_black,
+                "max": 100,
+            }
+
         for idx in range(1, 6):
             t_name = ss(g(f"1.3.6.1.2.1.43.11.1.1.6.1.{idx}"), "")
             t_max  = si(g(f"1.3.6.1.2.1.43.11.1.1.8.1.{idx}"), -1)
@@ -137,7 +149,7 @@ def collect_brother(ip: str, name: str, community: str, start: float) -> dict:
         _counters_event(ip, total, prev, alerts, [a["code"] for a in alerts],
                 full_color=full_color, black_white=bw, paper_size=None,
                 current_toner_level=black_level, prev_toner_level=prev_toner,
-                uptime=ut)
+                uptime=ut, poll_timestamp=datetime.fromtimestamp(start).isoformat())
 
         type_tag = "brother-color" if is_color else "brother"
         toner_pct_log = next(iter(toners.values()), {}).get("level")

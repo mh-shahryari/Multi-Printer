@@ -16,10 +16,11 @@ import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
-from config.settings import DB_PATH, VALIDATION_LOG_FILE
-from core.snmp.protocol import snmp_get_with_fallback, snmp_get, _SNMP_VERSION_CACHE
+from config.settings import VALIDATION_LOG_FILE, TONER_ALERT_THRESHOLDS
+from core.snmp.protocol import snmp_get_with_fallback, _detect_snmp_version
+from core.snmp.oid_map import OIDS
 from core import store
-from core.collectors.base import _counters_event, apply_toner_override
+from core.collectors.base import _counters_event, apply_toner_override, _bootstrap_yield_from_history, get_pages_since_last_reset
 from core.database import add_event
 
 log = logging.getLogger("PrinterMonitor")
@@ -146,35 +147,10 @@ def _save_counters_to_db(ip: str, total: int, color, bw, black_level,
 
 def detect_snmp_version(ip: str, community: str = "public", timeout: float = 2.0) -> Optional[int]:
     """
-    تشخیص نسخه SNMP با تست sysDescr
+    تشخیص نسخه SNMP با تکیه بر cache و negative-cache ماژول protocol.
     بازگشت: 1, 2, یا None
     """
-    cache_key = f"{ip}_{community}"
-    if cache_key in _SNMP_VERSION_CACHE:
-        return _SNMP_VERSION_CACHE[cache_key]
-
-    oid = "1.3.6.1.2.1.1.1.0"
-    
-    # تست v2c اول
-    try:
-        result = snmp_get(ip, oid, community, timeout=timeout, version=2)
-        if result is not None and str(result).strip():
-            _SNMP_VERSION_CACHE[cache_key] = 2
-            return 2
-    except Exception:
-        pass
-    
-    # تست v1
-    try:
-        result = snmp_get(ip, oid, community, timeout=timeout, version=1)
-        if result is not None and str(result).strip():
-            _SNMP_VERSION_CACHE[cache_key] = 1
-            return 1
-    except Exception:
-        pass
-    
-    _SNMP_VERSION_CACHE[cache_key] = None
-    return None
+    return _detect_snmp_version(ip, community, probe_timeout=timeout)
 
 
 def try_alternative_oids(ip: str, community: str, brand: str, cartridge_model: str = "", 
@@ -233,7 +209,9 @@ def walk_supplies_table(ip: str, community: str, brand: str = "unknown",
     """
     supplies = []
     
-    # برای Brother، روش اختصاصی
+    # برای Brother، اول روش اختصاصی امتحان می‌شود.
+    # اگر سطح تونر از OID اختصاصی به دست نیاید (مثل بعضی مدل‌های NC-8300h)،
+    # به روش استاندارد prtMarkerSuppliesTable fallback می‌کنیم.
     if brand == "brother":
         toner_level = snmp_get_with_fallback(ip, BROTHER_TONER_OID, community, 
                                               version=snmp_version, timeout=timeout)
@@ -277,8 +255,11 @@ def walk_supplies_table(ip: str, community: str, brand: str = "unknown",
                     })
             except Exception:
                 pass
-        
-        return supplies
+
+        # اگر تونر اختصاصی با موفقیت خوانده شد، همان را برگردان.
+        # در غیر این صورت، به روش عمومی prtMarkerSuppliesTable ادامه می‌دهیم.
+        if any(s.get("type_name") == "toner" for s in supplies):
+            return supplies
     
     # روش استاندارد برای سایر برندها
     for idx in range(1, ENHANCED_MAX_SUPPLIES + 1):
@@ -317,7 +298,15 @@ def walk_supplies_table(ip: str, community: str, brand: str = "unknown",
                 21: "cartridge"
             }
             type_name = type_names.get(stype_int, f"type_{stype_int}")
-            
+            # Brother برخی consumableها را با typeهای غیر دقیق گزارش می‌کند.
+            # برای نمایش صحیح درام و تونر، از نام مصرفی هم کمک می‌گیریم.
+            if brand == "brother":
+                lowered_name = name_str.lower()
+                if "drum" in lowered_name:
+                    type_name = "drum"
+                elif "toner" in lowered_name:
+                    type_name = "toner"
+
             percent = None
             max_int = -2
             rem_int = -2
@@ -343,31 +332,25 @@ def walk_supplies_table(ip: str, community: str, brand: str = "unknown",
                     rem_int = alt_percent
                     max_int = 100
 
-            # ✅ باگ #6: حذف برآورد تونر بدون سنسور (فرمول modulo کاملاً غلط بود)
-            # وقتی سنسور در دسترس نیست، null نمایش بده
-            if percent is None and rem_int == -2:
-                status = "no_sensor"
-                log.info(f"  [{ip}] Supply {idx} ({name_str}): no sensor data available")
-            
             # وضعیت
             status = "N/A"
             if percent is not None:
-                if percent == 0: status = "empty"
-                elif percent <= 10: status = "critical"
-                elif percent <= 25: status = "low"
-                else: status = "ok"
+                if percent == 0:
+                    status = "empty"
+                elif percent <= 10:
+                    status = "critical"
+                elif percent <= 25:
+                    status = "low"
+                else:
+                    status = "ok"
             elif rem_int == -2:
-                # بررسی: آیا OID بدون سنسور است یا اصلاً موجود نیست؟
-                # برای HP و Canon: اگر نام کارتریج موجود است، شاید سنسور باشد
-                # برای branded devices که نام دارند اما rem -2، بیشتر "not_reported" است
+                # ✅ باگ #15: وقتی max معتبر نداریم، هرگز rem را به‌عنوان درصد فرض نکن.
+                # این حالت معمولاً یعنی سنسور/مقدار قابل‌اعتماد در دسترس نیست.
                 status = "no_sensor" if name_str and name_str != "Unknown" else "not_supported"
+                log.info(f"  [{ip}] Supply {idx} ({name_str}): no sensor data available")
             elif rem_int == -3:
                 status = "not_supported"
-            elif rem_int > 0 and max_int == -2:
-                if rem_int <= 100:
-                    percent = rem_int
-                    status = "ok" if percent > 25 else "low" if percent > 10 else "critical"
-            
+
             # فیلتر Unknownهای تکراری
             if name_str.startswith("Unknown"):
                 unknown_count = sum(1 for s in supplies if s["name"].startswith("Unknown"))
@@ -636,6 +619,92 @@ def _canon_display_percent(model: str, supply_name: str, percent: Optional[int])
     return percent
 
 
+
+def _read_toshiba_value(ip: str, community: str, key: str, snmp_version: int, default=None, timeout: float = 2.0):
+    oid = OIDS.get(key)
+    if not oid:
+        return default
+    value = snmp_get_with_fallback(ip, oid, community, version=snmp_version, timeout=timeout)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+
+def _collect_toshiba_job_data(ip: str, community: str, snmp_version: int, total: int, color: Optional[int]):
+    """خواندن شمارنده‌های اختصاصی Toshiba برای جلوگیری از overcount و تکمیل UI/log."""
+    a3_total = _read_toshiba_value(ip, community, "a3_total", snmp_version, default=None)
+    a4_total = _read_toshiba_value(ip, community, "a4_total", snmp_version, default=None)
+    prev = store._prev.get(ip) or {}
+    prev_a3 = prev.get("a3_total")
+    prev_a4 = prev.get("a4_total")
+
+    paper_size = None
+    if a3_total is not None and a4_total is not None and prev_a3 is not None and prev_a4 is not None:
+        delta_a3 = a3_total - prev_a3
+        delta_a4 = a4_total - prev_a4
+        if delta_a3 > 0 and delta_a4 == 0:
+            paper_size = "Large (A3/B4)"
+        elif delta_a4 > 0 and delta_a3 == 0:
+            paper_size = "Small (A4/A5)"
+        elif delta_a3 > 0 and delta_a4 > 0:
+            paper_size = "Mixed"
+
+    # برای ثبت رویداد، به total خام تکیه می‌کنیم و twin را وارد محاسبه pages نمی‌کنیم
+    # چون در برخی مدل‌های Toshiba دو فاز update باعث duplicate PRINT می‌شود.
+    bw_for_event = max(0, total - (color or 0)) if total is not None else None
+
+    copy_fc = _read_toshiba_value(ip, community, "print_copy_fc", snmp_version, default=0)
+    copy_bw = _read_toshiba_value(ip, community, "print_copy_bw", snmp_version, default=0)
+    printer_fc = _read_toshiba_value(ip, community, "print_printer_fc", snmp_version, default=0)
+    printer_bw = _read_toshiba_value(ip, community, "print_printer_bw", snmp_version, default=0)
+    twin = _read_toshiba_value(ip, community, "print_twin", snmp_version, default=0)
+    fax = _read_toshiba_value(ip, community, "print_fax", snmp_version, default=None)
+    list_count = _read_toshiba_value(ip, community, "print_list", snmp_version, default=None)
+    scan_fc = _read_toshiba_value(ip, community, "scan_fc", snmp_version, default=None)
+    scan_bw = _read_toshiba_value(ip, community, "scan_bw", snmp_version, default=None)
+    scan_net_fc = _read_toshiba_value(ip, community, "scan_net_fc", snmp_version, default=None)
+    scan_net_bw = _read_toshiba_value(ip, community, "scan_net_bw", snmp_version, default=None)
+
+    paper_sizes = {}
+    for key in ["a4", "a3", "a4r", "a5", "b4"]:
+        total_key = _read_toshiba_value(ip, community, f"{key}_total", snmp_version, default=None)
+        fc_key = _read_toshiba_value(ip, community, f"{key}_fc", snmp_version, default=None)
+        bw_key = _read_toshiba_value(ip, community, f"{key}_bw", snmp_version, default=None)
+        if total_key is not None or fc_key is not None or bw_key is not None:
+            paper_sizes[key.upper()] = {
+                "total": total_key or 0,
+                "fc": fc_key or 0,
+                "bw": bw_key or 0,
+            }
+
+    return {
+        "paper_size": paper_size,
+        "a3_total": a3_total,
+        "a4_total": a4_total,
+        "black_white_for_event": bw_for_event,
+        "counters": {
+            "printer": (printer_fc + printer_bw) if (printer_fc is not None and printer_bw is not None) else total,
+            "printer_fc": printer_fc,
+            "printer_bw": printer_bw,
+            "copy": (copy_fc + copy_bw) if (copy_fc is not None and copy_bw is not None) else None,
+            "copy_fc": copy_fc,
+            "copy_bw": copy_bw,
+            "fax": fax,
+            "list": list_count,
+            "twin": twin,
+            "scan_fc": scan_fc,
+            "scan_bw": scan_bw,
+            "scan_net_fc": scan_net_fc,
+            "scan_net_bw": scan_net_bw,
+        },
+        "paper_sizes": paper_sizes,
+    }
+
+
 def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
     """
     جمع‌آوری پیشرفته داده‌ها با استفاده از روش test_toner.py
@@ -729,6 +798,23 @@ def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
     else:
         color = None
         bw = total
+
+    is_toshiba = brand == "toshiba" or "toshiba" in sys_desc_str.lower()
+    toshiba_data = None
+    if is_toshiba:
+        try:
+            toshiba_total = _read_toshiba_value(ip, community, "print_total", snmp_version, default=None)
+            if toshiba_total is not None and toshiba_total >= 0:
+                total = toshiba_total
+            toshiba_color = _read_toshiba_value(ip, community, "print_fc", snmp_version, default=None)
+            if toshiba_color is not None:
+                color = min(toshiba_color, total) if total is not None else toshiba_color
+                device_type = "color" if color > 0 or device_type == "color" else device_type
+            bw = max(0, total - (color or 0)) if total is not None else bw
+            toshiba_data = _collect_toshiba_job_data(ip, community, snmp_version, total, color)
+        except Exception as exc:
+            log.warning("Toshiba vendor counters unavailable for %s: %s", ip, exc)
+            toshiba_data = None
     
     # ─── مدل و سریال ─────────────────────────────────────────────
     model = "Unknown"
@@ -762,32 +848,60 @@ def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
     # ─── تبدیل تونرها به فرمت toners ─────────────────────────────
     toners = {}
     for s in supplies:
-        if s["type_name"] in ("toner", "cartridge"):
-            # ✅ باگ #8: استفاده از تشخیص رنگ دقیق با regex
-            color_key = _detect_toner_color(s["name"]) or "black"
+        if s["type_name"] in ("toner", "cartridge", "drum", "opc"):
+            lowered_name = str(s.get("name", "")).lower()
+            if s["type_name"] in ("drum", "opc") or "drum" in lowered_name:
+                color_key = "drum"
+                display_level = s["percent"]
+            else:
+                # ✅ باگ #8: استفاده از تشخیص رنگ دقیق با regex
+                color_key = _detect_toner_color(s["name"]) or "black"
+                display_level = _canon_display_percent(model, s["name"], s["percent"])
 
-            display_level = _canon_display_percent(model, s["name"], s["percent"])
-            
             toners[color_key] = {
                 "level": display_level,
                 "status": s["status"] if s["status"] != "N/A" else "unknown",
                 "name": s["name"],
                 "remaining": s["remaining"],
                 "max": s["max"],
+                "index": s.get("index"),
             }
-    
+
     # اگر تونری پیدا نشد، یک تونر مشکی پیش‌فرض
     if not toners:
         toners["black"] = {"level": None, "status": "unknown", "name": "Toner", "remaining": -1, "max": -1}
 
+    # فیلدهای مصرف برای همه برندها به صورت سازگار نگه داشته می‌شوند؛ اگر داده‌ای
+    # وجود نداشته باشد UI آن را نمایش نمی‌دهد.
+    for toner_data in toners.values():
+        toner_data.setdefault("usage", None)
+        toner_data.setdefault("usage_m", None)
+
+    if is_toshiba:
+        for color_key in ("black", "cyan", "magenta", "yellow"):
+            if color_key not in toners:
+                continue
+            usage_raw = _read_toshiba_value(ip, community, f"toner_{color_key}_usage", snmp_version, default=None)
+            if usage_raw is not None and usage_raw > 0:
+                toners[color_key]["usage"] = usage_raw
+                toners[color_key]["usage_m"] = round(usage_raw / 1_000_000, 2)
+
     # ─── اعمال override دستی تونر بر اساس مصرف صفحات ─────────────────
     prev_override = store._prev.get(ip) or {}
+    if prev_override.get('yield_per_page', 2000) == 2000 and not prev_override.get('force_estimate'):
+        boot = _bootstrap_yield_from_history(ip, prev_override)
+        if boot:
+            prev_override = store._prev.get(ip) or prev_override
+
     override_color = prev_override.get('override_color')
+    pages_since_last_reset = get_pages_since_last_reset(prev_override, total)
     if prev_override.get('manual_override') and override_color and override_color in toners:
         snmp_level = toners[override_color].get('level')
         final_level = apply_toner_override(ip, total, snmp_level, color=override_color)
         if final_level is not None:
             toners[override_color]['level'] = final_level
+            if prev_override.get('force_estimate'):
+                toners[override_color]['source'] = 'forced_estimate'
             if final_level == 0:
                 toners[override_color]['status'] = 'empty'
             elif final_level <= 5:
@@ -799,12 +913,22 @@ def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
 
     # ─── هشدارها ─────────────────────────────────────────────────
     alerts = []
-    for s in supplies:
-        if s["status"] in ("critical", "empty", "low") and s["type_name"] in ("toner", "cartridge"):
-            alerts.append({
-                "message": f"{s['name']}: {s['status']} ({s['percent']}%)",
-                "code": s["index"]
-            })
+    for color_key, toner in toners.items():
+        level = toner.get("level")
+        if level is None:
+            continue
+        try:
+            level = int(level)
+        except (TypeError, ValueError):
+            continue
+        if level > TONER_ALERT_THRESHOLDS.get("warning", 15):
+            continue
+        status = "critical" if level <= TONER_ALERT_THRESHOLDS.get("critical", 5) else "low"
+        toner["status"] = "empty" if level == 0 else status
+        alerts.append({
+            "message": f"{toner.get('name', color_key)}: {toner['status']} ({level}%)",
+            "code": toner.get("index") or color_key,
+        })
     
     # ─── uptime ──────────────────────────────────────────────────
     ut_raw = snmp_get_with_fallback(ip, "1.3.6.1.2.1.1.3.0", community, version=snmp_version, timeout=2.0)
@@ -844,17 +968,24 @@ def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
                 black_level = t["level"]
                 break
     prev_toner = prev.get("toner_level")
-    
+    paper_size = (toshiba_data or {}).get("paper_size")
+    a3_total = (toshiba_data or {}).get("a3_total")
+    a4_total = (toshiba_data or {}).get("a4_total")
+    bw_for_event = (toshiba_data or {}).get("black_white_for_event", bw)
+
     # ✅ باگ #2: ثبت رویداد اول (قبل از نوشتن DB)
     _counters_event(ip, total, prev, alerts, [a["code"] for a in alerts],
-                    full_color=color, black_white=bw, paper_size=None,
+                    full_color=color, black_white=bw_for_event, paper_size=paper_size,
                     current_toner_level=black_level, prev_toner_level=prev_toner,
-                    uptime=ut)
+                    uptime=ut, a3_total=a3_total, a4_total=a4_total,
+                    poll_timestamp=datetime.fromtimestamp(start_time).isoformat())
     
-    # ✅ باگ #2 + #5: نوشتن در دیتابیس فقط بعد از موفقیت رویداد
+    # ✅ باگ #5: منبع حقیقت فقط PrevStore/`printer_counters` است.
+    # از نوشتن مستقیم و مضاعف در دیتابیس خودداری می‌کنیم.
     if save_to_db:
-        _save_counters_to_db(ip, total, color, bw, black_level, prev_override, device_type, toners, supplies, alerts)
-    
+        log.debug("Enhanced snapshot persisted via PrevStore only for %s", ip)
+
+    vendor_counters = (toshiba_data or {}).get("counters", {})
     return {
         "ip": ip, "name": name, "nickname": nickname, "brand": brand,
         "device_type": device_type,
@@ -871,16 +1002,22 @@ def collect_enhanced(printer: dict, save_to_db: bool = True) -> dict:
             "total": total,
             "full_color": color if color else None,
             "black_white": bw,
-            "printer": None,  # ✅ باگ #7: وقتی OID در دسترس نیست، None نمایش بده
-            "copy": None,     # ✅ باگ #7: وقتی OID در دسترس نیست، None نمایش بده
-            "fax": None,
-            "list": None,     # ✅ باگ #7: وقتی OID در دسترس نیست، None نمایش بده
-            "scan_fc": None,
-            "scan_bw": None,
-            "scan_net_fc": None,
-            "scan_net_bw": None,
+            "printer": vendor_counters.get("printer", total),
+            "printer_fc": vendor_counters.get("printer_fc"),
+            "printer_bw": vendor_counters.get("printer_bw"),
+            "copy": vendor_counters.get("copy"),
+            "copy_fc": vendor_counters.get("copy_fc"),
+            "copy_bw": vendor_counters.get("copy_bw"),
+            "fax": vendor_counters.get("fax"),
+            "list": vendor_counters.get("list"),
+            "twin": vendor_counters.get("twin"),
+            "scan_fc": vendor_counters.get("scan_fc"),
+            "scan_bw": vendor_counters.get("scan_bw"),
+            "scan_net_fc": vendor_counters.get("scan_net_fc"),
+            "scan_net_bw": vendor_counters.get("scan_net_bw"),
+            "pages_since_last_reset": pages_since_last_reset,
         },
-        "paper_sizes": {},
+        "paper_sizes": (toshiba_data or {}).get("paper_sizes", {}),
         "trays": trays,
         "toners": toners,
         "alerts": alerts,

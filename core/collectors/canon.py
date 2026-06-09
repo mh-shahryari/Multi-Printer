@@ -398,7 +398,7 @@ def collect_canon(ip: str, name: str, community: str, start: float) -> dict:
                 full_color=full_color, black_white=black_white,
                 paper_size=None, username=last_user,
                 current_toner_level=black_level, prev_toner_level=prev_toner,
-                uptime=ut)
+                uptime=ut, poll_timestamp=datetime.fromtimestamp(start).isoformat())
 
         brand_tag = "canon-mf" if is_mf else "canon-lbp"
         log.info(f"  ✓ {name} [{brand_tag}] total={total:,} {elapsed}ms")

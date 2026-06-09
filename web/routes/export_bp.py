@@ -7,7 +7,7 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request, make_response, send_file
 from flask_login import current_user
 from core import store
-from core.database import get_log, get_all_logs
+from core.database import get_log, get_all_logs, get_reset_history
 from web.auth import allowed_printer_ips, user_allowed_offices
 
 bp = Blueprint("export", __name__)
@@ -221,6 +221,31 @@ def export_excel():
         ws3.cell(ri, 9).fill = PatternFill("solid", start_color=bg)
     for i, w in enumerate([19,14,14,12,36,8,12,8,10,12]):
         ws3.column_dimensions[get_column_letter(i+1)].width = w
+
+    # Sheet 3: Reset History
+    ws4 = wb.create_sheet("Reset History"); ws4.sheet_view.rightToLeft = True
+    H4 = ["زمان تنظیم","IP","نام دستگاه","رنگ","درصد تنظیم‌شده","کل صفحات در لحظه تنظیم",
+          "صفحات چاپ‌شده پس از تنظیم","صفحات به ازای هر 1٪"]
+    for ci, h in enumerate(H4, 1): hcell(ws4, 1, ci, h)
+    ws4.row_dimensions[1].height = 28
+    current_totals = {d.get("ip"): (d.get("counters", {}) or {}).get("total") for d in snap if d.get("ip")}
+    reset_rows = get_reset_history(ips=[p["ip"] for p in cfg], limit=5000, current_totals=current_totals)
+    for ri, row in enumerate(reset_rows, 2):
+        bg = ROWS[ri % 2]
+        vals = [
+            (row.get("timestamp") or "")[:19].replace("T", " "),
+            row.get("printer_ip", ""),
+            row.get("printer_name", ""),
+            row.get("color", ""),
+            row.get("set_level", ""),
+            row.get("total_pages_at_reset", ""),
+            row.get("pages_printed_after_reset", ""),
+            row.get("pages_per_1pct", ""),
+        ]
+        for ci, v in enumerate(vals, 1):
+            dcell(ws4, ri, ci, v, bg)
+    for i, w in enumerate([19, 14, 18, 12, 12, 18, 20, 18]):
+        ws4.column_dimensions[get_column_letter(i+1)].width = w
 
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     fname = f"printer_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"

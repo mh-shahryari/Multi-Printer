@@ -119,19 +119,21 @@ def has_role(user, *roles):
     return bool(user and getattr(user, "role", None) in roles)
 
 
-def _clean_list(value):
+def _clean_list(value, *, lower: bool = True):
     if not value:
         return []
     if isinstance(value, str):
         try:
             value = json.loads(value)
         except Exception:
-            return [value]
+            return [value.strip().lower() if lower else value.strip()] if value.strip() else []
     if not isinstance(value, (list, tuple, set)):
         value = [value]
     items = []
     for item in value:
         text = str(item).strip()
+        if lower:
+            text = text.lower()
         if text and text not in items:
             items.append(text)
     return items
@@ -148,11 +150,11 @@ def office_for_ip(ip: str) -> str:
 
 
 def user_allowed_offices(user):
-    return _clean_list(getattr(user, "allowed_offices", []))
+    return _clean_list(getattr(user, "allowed_offices", []), lower=True)
 
 
 def user_allowed_modules(user):
-    return _clean_list(getattr(user, "allowed_modules", []))
+    return _clean_list(getattr(user, "allowed_modules", []), lower=True)
 
 
 def user_can_access_module(user, module_name: str) -> bool:
@@ -160,6 +162,7 @@ def user_can_access_module(user, module_name: str) -> bool:
         return False
     if getattr(user, "role", None) == "admin":
         return True
+    module_name = str(module_name or "").strip().lower()
     allowed = user_allowed_modules(user)
     return not allowed or module_name in allowed
 
@@ -181,7 +184,7 @@ def allowed_printer_ips(user):
         return []
     if getattr(user, "role", None) == "admin":
         return []
-    allowed = user_allowed_offices(user)
+    allowed = set(user_allowed_offices(user))
     if not allowed:
         return []
     from core import store
@@ -190,10 +193,13 @@ def allowed_printer_ips(user):
         printers = list(store.PRINTERS)
     allowed_ips = []
     for printer in printers:
-        office_id = office_for_ip(printer.get("ip", ""))
+        printer_ip = (printer.get("ip") or "").strip()
+        if not printer_ip:
+            continue
+        office_id = office_for_ip(printer_ip)
         if office_id in allowed:
-            allowed_ips.append(printer.get("ip"))
-    return [ip for ip in allowed_ips if ip]
+            allowed_ips.append(printer_ip)
+    return allowed_ips
 
 
 def role_required(*roles):
